@@ -43,7 +43,7 @@ Type getPointeeType(Type type) {
     Type pointeeType = ptrType.getPointeeType();
     return RankedTensorType::get(shape, pointeeType, tensorType.getEncoding());
   } else if (auto ptrType = type.dyn_cast<triton::PointerType>()) {
-    // scalar pointer
+    // Scalar pointer
     Type pointeeType = ptrType.getPointeeType();
     return pointeeType;
   }

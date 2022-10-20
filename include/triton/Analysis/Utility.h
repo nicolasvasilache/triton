@@ -32,6 +32,7 @@ SmallVector<T> reorder(ArrayRef<T> input, ArrayRef<unsigned> order) {
   return result;
 }
 
+// Type is TT_PtrLikeType
 Type getPointeeType(Type type);
 
 } // namespace mlir
