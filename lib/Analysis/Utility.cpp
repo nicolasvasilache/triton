@@ -35,4 +35,19 @@ std::string getValueOperandName(Value value, AsmState &state) {
   return std::move(opName);
 }
 
+Type getPointeeType(Type type) {
+  if (auto tensorType = type.dyn_cast<RankedTensorType>()) {
+    // Tensor of pointers
+    auto shape = tensorType.getShape();
+    auto ptrType = tensorType.getElementType().dyn_cast<triton::PointerType>();
+    Type pointeeType = ptrType.getPointeeType();
+    return RankedTensorType::get(shape, pointeeType, tensorType.getEncoding());
+  } else if (auto ptrType = type.dyn_cast<triton::PointerType>()) {
+    // scalar pointer
+    Type pointeeType = ptrType.getPointeeType();
+    return pointeeType;
+  }
+  return Type();
+}
+
 } // namespace mlir

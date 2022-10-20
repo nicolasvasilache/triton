@@ -25,21 +25,6 @@ static Type getI1SameShape(Type type) {
   return Type();
 }
 
-static Type getPointeeType(Type type) {
-  if (auto tensorType = type.dyn_cast<RankedTensorType>()) {
-    // Tensor of pointers
-    auto shape = tensorType.getShape();
-    auto ptrType = tensorType.getElementType().dyn_cast<PointerType>();
-    Type pointeeType = ptrType.getPointeeType();
-    return RankedTensorType::get(shape, pointeeType, tensorType.getEncoding());
-  } else if (auto ptrType = type.dyn_cast<PointerType>()) {
-    // scalar pointer
-    Type pointeeType = ptrType.getPointeeType();
-    return pointeeType;
-  }
-  return Type();
-}
-
 namespace gpu {
 
 // TODO: Inheritation of layout attributes
@@ -439,7 +424,7 @@ ParseResult parseInsertSliceAsyncOp(OpAsmParser &parser,
   if (allOperands.size() >= 4)
     operandTypes.push_back(triton::getI1SameShape(srcType)); // mask
   if (allOperands.size() >= 5)
-    operandTypes.push_back(triton::getPointeeType(srcType)); // other
+    operandTypes.push_back(getPointeeType(srcType)); // other
 
   if (parser.resolveOperands(allOperands, operandTypes, allOperandLoc,
                              result.operands))

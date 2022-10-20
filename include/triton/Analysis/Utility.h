@@ -32,6 +32,8 @@ SmallVector<T> reorder(ArrayRef<T> input, ArrayRef<unsigned> order) {
   return result;
 }
 
+Type getPointeeType(Type type);
+
 } // namespace mlir
 
 #endif // TRITON_ANALYSIS_UTILITY_H

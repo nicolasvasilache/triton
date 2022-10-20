@@ -1,3 +1,4 @@
+#include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
@@ -32,23 +33,9 @@ static Type getPointerTypeSameShape(Type type) {
     auto shape = tensorType.getShape();
     PointerType ptrType = PointerType::get(elementType, 1);
     return RankedTensorType::get(shape, ptrType, tensorType.getEncoding());
-  } else if (auto ptrType = type.dyn_cast<PointerType>()) {
-    return ptrType;
+  } else {
+    return PointerType::get(type, 1);
   }
-  assert(false && "Could not infer pointer type");
-}
-
-static Type getPointeeTypeSameShape(Type type) {
-  if (auto tensorType = type.dyn_cast<RankedTensorType>()) {
-    auto elementType =
-        tensorType.getElementType().dyn_cast<PointerType>().getPointeeType();
-    auto shape = tensorType.getShape();
-    PointerType ptrType = PointerType::get(elementType, 1);
-    return RankedTensorType::get(shape, ptrType, tensorType.getEncoding());
-  } else if (auto ptrType = type.dyn_cast<PointerType>()) {
-    return ptrType.getPointeeType();
-  }
-  assert(false && "Could not infer pointee type");
 }
 
 // Parser & printer for assembly forms
@@ -164,7 +151,7 @@ void LoadOp::build(::mlir::OpBuilder &builder, ::mlir::OperationState &state,
                    ::mlir::Value ptr, ::mlir::Value mask, ::mlir::Value other,
                    ::mlir::triton::CacheModifier cache,
                    ::mlir::triton::EvictionPolicy evict, bool isVolatile) {
-  Type resultType = getPointeeTypeSameShape(ptr.getType());
+  Type resultType = getPointeeType(ptr.getType());
   state.addOperands(ptr);
   if (mask) {
     state.addOperands(mask);
