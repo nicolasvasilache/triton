@@ -415,6 +415,13 @@ void init_triton_ir(py::module &&m) {
       // Use arith.ConstantOp to create constants
       // // Constants
       // .def("get_int1", &ir::builder::get_int1, ret::reference)
+      .def("get_int1",
+           [](mlir::OpBuilder &self, int64_t v) -> mlir::Value {
+             auto loc = self.getUnknownLoc();
+             return mlir::Value(self.create<mlir::arith::ConstantIntOp>(
+                 loc, v, self.getI1Type()));
+           })
+
       .def("get_int32",
            [](mlir::OpBuilder &self, int64_t v) -> mlir::Value {
              auto loc = self.getUnknownLoc();
@@ -1120,8 +1127,8 @@ void init_triton_ir(py::module &&m) {
                                                 falseValue);
            })
       // // Intrinsics
-      // // These have no place in the IR, and hopefully they can be removed at
-      // some point .def("create_umulhi", &ir::builder::create_umulhi,
+      // // These have no place in the IR, and hopefully they can be removed
+      // at some point .def("create_umulhi", &ir::builder::create_umulhi,
       // ret::reference) .def("create_barrier", &ir::builder::create_barrier,
       // ret::reference);
       ;
@@ -1195,7 +1202,6 @@ void init_triton_ir(py::module &&m) {
 }
 
 void init_triton_translation(py::module &m) {
-
   using ret = py::return_value_policy;
 
   m.def("get_shared_memory_size", [](mlir::ModuleOp module) {
