@@ -1469,6 +1469,7 @@ class CompiledKernel:
         def runner(*args, stream=None):
             if stream is None:
                 stream = torch.cuda.current_stream().cuda_stream
+            #print(args)
             self.c_wrapper(grid[0], grid[1], grid[2], self.num_warps, self.shared, stream, self.cu_function, *args)
         return runner
 
