@@ -167,31 +167,33 @@ def get_proper_err(a, b, golden):
 
 
 @pytest.mark.parametrize('SIZE_M,SIZE_N,SIZE_K,NUM_WARPS,BLOCK_SIZE_M,BLOCK_SIZE_N,BLOCK_SIZE_K,TRANS_A,TRANS_B', [
-    # Non-forloop
-    [64, 32, 64, 4, 64, 32, 64, False, False],
-    [128, 64, 128, 4, 128, 64, 128, False, False],
-    [16, 16, 16, 16, 16, 16, 16, False, False],  # wpt overflow issue
-    # K-Forloop
-    [32, 32, 64, 4, 32, 32, 32, False, False], # Single shared encoding
-    [16, 16, 128, 4, 16, 16, 16, False, False], # Single shared encoding and small k
-    [64, 32, 128, 4, 64, 32, 64, False, False],
-    [128, 16, 128, 4, 128, 16, 32, False, False],
-    [32, 16, 128, 4, 32, 16, 32, False, False],
-    [32, 64, 128, 4, 32, 64, 32, False, False],
-    [32, 128, 256, 4, 32, 128, 64, False, False],
-    [64, 128, 64, 4, 64, 128, 32, False, False],
-    [64, 64, 128, 4, 64, 64, 32, False, False],
-    [128, 128, 64, 4, 128, 128, 32, False, False],
-    [128, 128, 128, 4, 128, 128, 32, False, False],
-    [128, 128, 256, 4, 128, 128, 64, False, False],
-    [128, 256, 128, 4, 128, 256, 32, False, False],
-    [256, 128, 64, 4, 256, 128, 16, False, False],
-    [128, 64, 128, 4, 128, 64, 32, False, False],
-    [16, 16, 64, 4, 16, 16, 16, False, False],
-    [32, 32, 64, 4, 32, 32, 32, False, False],
-    # trans
-    [128, 64, 128, 4, 128, 64, 32, True, False],
-    [128, 64, 128, 4, 128, 64, 32, False, True],
+    config + [trans_a] + [trans_b]
+    for config in
+    [  # Non-forloop
+        [64, 32, 64, 4, 64, 32, 64],
+        [128, 64, 128, 4, 128, 64, 128],
+        #[16, 16, 16, 16, 16, 16, 16],  # wpt overflow issue
+        # K-Forloop
+        [32, 32, 64, 4, 32, 32, 32],  # Single shared encoding
+        [16, 16, 128, 4, 16, 16, 16],  # Single shared encoding and small k
+        [64, 32, 128, 4, 64, 32, 64],
+        [128, 16, 128, 4, 128, 16, 32],
+        [32, 16, 128, 4, 32, 16, 32],
+        [32, 64, 128, 4, 32, 64, 32],
+        [32, 128, 256, 4, 32, 128, 64],
+        [64, 128, 64, 4, 64, 128, 32],
+        [64, 64, 128, 4, 64, 64, 32],
+        [128, 128, 64, 4, 128, 128, 32],
+        [128, 128, 128, 4, 128, 128, 32],
+        [128, 128, 256, 4, 128, 128, 64],
+        [128, 256, 128, 4, 128, 256, 32],
+        [256, 128, 64, 4, 256, 128, 16],
+        [128, 64, 128, 4, 128, 64, 32],
+        [16, 16, 64, 4, 16, 16, 16],
+        [32, 32, 64, 4, 32, 32, 32]
+    ]
+    for trans_a in [True, False]
+    for trans_b in [True, False]
 ])
 def test_gemm(SIZE_M, SIZE_N, SIZE_K, NUM_WARPS, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, TRANS_A, TRANS_B):
     if (TRANS_A):
