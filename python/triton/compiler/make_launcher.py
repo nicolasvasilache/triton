@@ -31,6 +31,7 @@ def make_stub(name, signature, constants, ids, **kwargs):
     if cache_path is None:
         with tempfile.TemporaryDirectory() as tmpdir:
             src = generate_launcher(constants, signature, ids)
+            print(src)
             src_path = os.path.join(tmpdir, "main.c")
             with open(src_path, "w") as f:
                 f.write(src)

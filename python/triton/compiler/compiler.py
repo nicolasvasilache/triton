@@ -161,14 +161,15 @@ def _add_external_libs(mod, libs):
     add_external_libs(mod, list(libs.keys()), list(libs.values()))
 
 
-def ttgir_to_llir(mod, extern_libs, target, tma_infos):
+def ttgir_to_llir(module, extern_libs, target, tma_infos):
     if extern_libs:
-        _add_external_libs(mod, extern_libs)
+        _add_external_libs(module, extern_libs)
+    print('ttgir_to_llir')
     # TODO: separate tritongpu_to_llvmir for different backends
     if _is_cuda(target):
-        return translate_triton_gpu_to_llvmir(mod, target.capability, tma_infos, runtime.TARGET.NVVM)
+        return translate_triton_gpu_to_llvmir(module, target.capability, tma_infos, runtime.TARGET.NVVM)
     else:
-        return translate_triton_gpu_to_llvmir(mod, 0, TMAInfos(), runtime.TARGET.ROCDL)
+        return translate_triton_gpu_to_llvmir(module, 0, TMAInfos(), runtime.TARGET.ROCDL)
 
 
 # PTX translation
@@ -362,238 +363,52 @@ def add_cuda_stages(target, extern_libs, stages):
 
 
 def compile(fn, **kwargs):
-    # Get device type to decide which backend should be used
-    device_type = kwargs.get("device_type", "cuda")
-    capability = kwargs.get("cc", None)
-
-    if is_hip():
-        device_type = "hip"
-    is_cuda = device_type == "cuda"
-    if is_hip():
-        is_cuda = False
-
-    context = ir.context()
+    signature = kwargs["signature"]
+    configs = kwargs.get("configs", None)
     constants = kwargs.get("constants", dict())
-    num_warps = kwargs.get("num_warps", get_arch_default_num_warps(device_type))
-    assert num_warps > 0 and (num_warps & (num_warps - 1)) == 0, "num_warps must be a power of 2"
-    num_ctas = kwargs.get("num_ctas", 1)
-    num_stages = kwargs.get("num_stages", get_arch_default_num_stages(device_type, capability=capability))
-    enable_fp_fusion = kwargs.get("enable_fp_fusion", True)
-    # TODO[shuhaoj]: Default should be to enable warp specialization once possible
-    enable_warp_specialization = kwargs.get("enable_warp_specialization", False)
-    # TODO[shuhaoj]: persistent can be decoupled with warp specialization
-    enable_persistent = kwargs.get("enable_persistent", enable_warp_specialization)
-    extern_libs = kwargs.get("extern_libs", dict())
-    if extern_libs is None:
-        extern_libs = dict()
-    debug = kwargs.get("debug", False)
-    # Flag to control whether to store mma layout directly
-    optimize_epilogue = False
-    if os.environ.get('OPTIMIZE_EPILOGUE', '') == '1':
-        optimize_epilogue = True
-    #
+    debug = True
+    target = None
+    # parse_mlir_module(path, context)
+    a = ast_to_ttir(fn, signature, configs[0], constants, debug=debug, target=target)
+    # print(a)
+
+    b = optimize_ttir(a, target)
+    # print(b)
+
+    capability = 90
+    num_warps = 8
+    num_ctas = 2 # this triggers all sorts of bugs and needs 90+
+    assert num_ctas == 1 or capability >= 90, "num_ctas > 1 requires capability >= 90"
+    enable_fp_fusion = True
+
+    target = CudaTargetDescriptor( \
+        capability=get_cuda_capability(capability),
+        num_warps=num_warps,
+        enable_fp_fusion=enable_fp_fusion)
+    print(target)
+    c = ttir_to_ttgir(b, num_warps, num_ctas, target)
+    # print(c)
+
+    num_stages = 0
     cluster_info = ClusterInfo()
-    if "clusterDims" in kwargs:
-        cluster_info.clusterDimX = kwargs["clusterDims"][0]
-        cluster_info.clusterDimY = kwargs["clusterDims"][1]
-        cluster_info.clusterDimZ = kwargs["clusterDims"][2]
+    enable_warp_specialization = False
+    enable_persistent = False
+    optimize_epilogue = False
+    d = optimize_ttgir(c, num_stages, num_warps, num_ctas, target, cluster_info,
+            enable_warp_specialization, enable_persistent, optimize_epilogue)
+    # print(d)
+
+    # import pdb; pdb.set_trace()
+    extern_libs = dict()
     tma_infos = TMAInfos()
-    # build architecture descriptor
-    if device_type == "cuda":
-        _device_backend = get_backend(device_type)
-        target = CudaTargetDescriptor(capability=get_cuda_capability(capability), num_warps=num_warps, enable_fp_fusion=enable_fp_fusion)
-    else:
-        _device_backend = get_backend(device_type)
-        assert _device_backend
-        target = _device_backend.get_architecture_descriptor(**kwargs)
-    # build compilation stages
-    stages = dict()
-    stages["ast"] = (lambda path: fn, None)
-    stages["ttir"] = (lambda path: parse_mlir_module(path, context),
-                      lambda src: optimize_ttir(ast_to_ttir(src, signature, configs[0], constants, debug=debug, target=target), target))
-    if is_cuda:
-        stages["ttgir"] = (lambda path: parse_mlir_module(path, context),
-                           lambda src: optimize_ttgir(ttir_to_ttgir(src, num_warps, num_ctas, target), num_stages, num_warps, num_ctas, target, cluster_info, enable_warp_specialization, enable_persistent, optimize_epilogue))
-        stages["llir"] = (lambda path: Path(path).read_text(),
-                          lambda src: ttgir_to_llir(src, extern_libs, target, tma_infos))
-        add_cuda_stages(target, extern_libs, stages)
-    elif device_type == "hip":
-        _device_backend.add_stages(target, extern_libs, stages, num_warps=num_warps, num_stages=num_stages)
-    else:
-        # pass the user's configuration to the backend device.
-        target["num_warps"] = num_warps
-        target["num_stages"] = num_stages
-        target["num_ctas"] = num_ctas
-        _device_backend.add_stages(target, extern_libs, stages)
+    e = ttgir_to_llir(d, extern_libs, target, tma_infos)
+    # print(e)
 
-    # find out the signature of the function
-    if isinstance(fn, JITFunction):
-        configs = kwargs.get("configs", None)
-        signature = kwargs["signature"]
-        if configs is None:
-            configs = [instance_descriptor()]
-        assert len(configs) == 1
-        kwargs["configs"] = configs
-        name = fn.__name__
-        first_stage = 0
-        if isinstance(signature, str):
-            signature = {k: v.strip() for k, v in enumerate(signature.split(","))}
-        kwargs["signature"] = signature
-    else:
-        assert isinstance(fn, str)
-        _, ir_name = os.path.basename(fn).split(".")
-        src = Path(fn).read_text()
-        import re
-        match = re.search(prototype_pattern[ir_name], src, re.MULTILINE)
-        # TODO: support function attributes at group 3 (e.g., device function)
-        name, signature = match.group(1), match.group(2)
-        types = re.findall(arg_type_pattern[ir_name], signature)
-        if ir_name == 'ttgir':
-            num_warps_matches = re.findall(ttgir_num_warps_pattern, src)
-            assert len(num_warps_matches) == 1, "Expected exactly one match for num_warps"
-            assert "num_warps" not in kwargs or int(num_warps_matches[0]) == num_warps, "num_warps in ttgir does not match num_warps in compile"
-            num_warps = int(num_warps_matches[0])
-        param_tys = [convert_type_repr(ty) for ty in types]
-        signature = {k: v for k, v in enumerate(param_tys)}
-        first_stage = list(stages.keys()).index(ir_name)
+    f = llir_to_ptx(e, target)
+    print(f)
 
-    # create cache manager
-    fn_cache_manager = get_cache_manager(make_hash(fn, target, get_env_vars(), _device_backend, **kwargs))
-    # managers used to dump and override IR for debugging
-    enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
-    fn_override_manager = get_override_manager(make_hash(fn, target, get_env_vars(), _device_backend, **kwargs, ignore_version=True))
-    fn_dump_manager = get_dump_manager(make_hash(fn, target, get_env_vars(), _device_backend, **kwargs, ignore_version=True))
-
-    # determine name and extension type of provided function
-    if isinstance(fn, JITFunction):
-        name, ext = fn.__name__, "ast"
-    else:
-        name, ext = os.path.basename(fn).split(".")
-
-    # load metadata if any
-    metadata = None
-    metadata_filename = f"{name}.json"
-
-    # The group is addressed by the metadata
-    metadata_group = fn_cache_manager.get_group(
-        metadata_filename
-    ) or {}
-
-    metadata_path = metadata_group.get(metadata_filename)
-
-    if metadata_path is not None:
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-            if 'tensormaps_info' in metadata:
-                metadata['tensormaps_info'] = [
-                    InfoFromBackendForTensorMap(e) for e in metadata['tensormaps_info']]
-    else:
-        metadata = {"num_warps": num_warps,
-                    "num_ctas": num_ctas,
-                    "num_stages": num_stages,
-                    "enable_warp_specialization": enable_warp_specialization,
-                    "enable_persistent": enable_persistent,
-                    "constants": _get_jsonable_constants(constants),
-                    "debug": debug,
-                    "target": target, }
-        metadata.update(get_env_vars())
-        if ext == "ptx":
-            assert "shared" in kwargs, "ptx compilation must provide shared memory size"
-            metadata["shared"] = kwargs["shared"]
-
-    # Add device type to meta information
-    metadata["device_type"] = device_type
-
-    first_stage = list(stages.keys()).index(ext)
-    asm = LazyDict()
-    module = fn
-    # run compilation pipeline  and populate metadata
-    for ir_name, (parse, compile_kernel) in list(stages.items())[first_stage:]:
-        ir_filename = f"{name}.{ir_name}"
-
-        if ir_name == ext:
-            next_module = parse(fn)
-        else:
-            path = metadata_group.get(ir_filename)
-            if path is None:
-                next_module = compile_kernel(module)
-                if ir_name == "amdgcn":
-                    extra_file_name = f"{name}.hsaco_path"
-                    metadata_group[ir_filename] = fn_cache_manager.put(next_module[0], ir_filename)
-                    metadata_group[extra_file_name] = fn_cache_manager.put(next_module[1], extra_file_name)
-                else:
-                    metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
-                    fn_dump_manager.put(next_module, ir_filename)
-                    if (enable_override and fn_override_manager.has_file(ir_filename)):
-                        print(f"\nOverriding kernel with file {ir_filename}")
-                        full_name = fn_override_manager.get_file(ir_filename)
-                        next_module = parse(full_name)
-            else:
-                if ir_name == "amdgcn":
-                    extra_file_name = f"{name}.hsaco_path"
-                    hasco_path = metadata_group.get(extra_file_name)
-                    assert hasco_path is not None, "Expected to have hsaco_path in metadata when we have the amdgcn"
-                    next_module = (parse(path), parse(hasco_path))
-                else:
-                    next_module = parse(path)
-
-        if ir_name == "cubin":
-            asm[ir_name] = next_module
-            asm["sass"] = lambda: get_sass(next_module)
-        elif ir_name == "amdgcn":
-            asm[ir_name] = str(next_module[0])
-        else:
-            asm[ir_name] = str(next_module)
-        if ir_name == "llir" and "shared" not in metadata:
-            if is_hip():
-                metadata["shared"] = _device_backend.get_shared_memory_size(module)
-            else:
-                metadata["shared"] = get_shared_memory_size(module)
-        if ir_name == "ttgir":
-            if is_hip():
-                metadata["num_warps"] = _device_backend.get_num_warps(next_module)
-            else:
-                metadata["enable_warp_specialization"] = ir.is_ws_supported(next_module)
-                if metadata["enable_warp_specialization"]:
-                    metadata["num_warps"] = get_num_warps(next_module)
-        if ir_name == "ptx":
-            metadata["name"] = get_kernel_name(next_module, pattern='// .globl')
-        if ir_name == "amdgcn":
-            metadata["name"] = get_kernel_name(next_module[0], pattern='.globl')
-            asm["hsaco_path"] = next_module[1]
-        if not is_cuda and not is_hip():
-            _device_backend.add_meta_info(ir_name, module, next_module, metadata, asm)
-        module = next_module
-
-    ids_of_folded_args = tuple([int(k) for k in configs[0].ids_of_folded_args]) if isinstance(fn, JITFunction) else ()
-    if "clusterDims" not in metadata:
-        metadata["clusterDims"] = [
-            cluster_info.clusterDimX,
-            cluster_info.clusterDimY,
-            cluster_info.clusterDimZ]
-
-    if len(tma_infos) > 0:
-        metadata["tensormaps_info"] = parse_tma_info(tma_infos, ids_of_folded_args)
-    # set constant
-    if "tensormaps_info" in metadata:
-        for i, _ in enumerate(metadata["tensormaps_info"]):
-            metadata["tensormaps_info"][i].ids_of_folded_args = ids_of_folded_args
-
-    ids_of_tensormaps = get_ids_of_tensormaps(metadata.get("tensormaps_info", None))
-    if isinstance(fn, JITFunction) and "tensormaps_info" in metadata:
-        fn.tensormaps_info = metadata["tensormaps_info"]
-
-    ids_of_const_exprs = tuple(fn.constexprs) if isinstance(fn, JITFunction) else ()
-    ids = {"ids_of_tensormaps": ids_of_tensormaps, "ids_of_folded_args": ids_of_folded_args, "ids_of_const_exprs": ids_of_const_exprs}
-    # cache manager
-    if is_cuda:
-        so_path = make_stub(name, signature, constants, ids, enable_warp_specialization=enable_warp_specialization)
-    else:
-        so_path = _device_backend.make_launcher_stub(name, signature, constants, ids)
-    # write-back metadata, if it didn't come from the cache
-    if metadata_path is None:
-        metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename, binary=False)
-    fn_cache_manager.put_group(metadata_filename, metadata_group)
+    g = ptx_to_cubin(f, target)
+    # print(g)
 
     # return handle to compiled kernel
     return CompiledKernel(fn, so_path, metadata, asm)

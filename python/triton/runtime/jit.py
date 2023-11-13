@@ -203,16 +203,9 @@ class KernelInterface(Generic[T]):
         return cast(T, functools.partial(cast(Callable, self.run), grid=grid))
 
 
-class JITFunction(KernelInterface[T]):
-    # Hook for inspecting compiled functions and modules
-    cache_hook = None
-    divisibility = 16
-    # As Hopper TMA load and store primitive requires the tensor stride to be 16-byte aligned.
-    # And we only support WGMMA with float16 dtype on Hopper for now.
-    # So whether the LoadOp and StoreOp will lowering into TMA copy depend on whether the tensor stride is divisible by 8.
-    # TODO: Make it more reasonable to handle multiple dtypes.
-    divisibility_8 = 8
 
+# Does lots of hardcoded stuff for CUDA, memoization blabla and then compiles..
+class JITFunction(KernelInterface[T]):
     @staticmethod
     def _key_of(arg):
         if hasattr(arg, "dtype"):
@@ -257,30 +250,6 @@ class JITFunction(KernelInterface[T]):
 
     # TODO(jlebar): Fold this into the KernelArg class.
     def _get_config(self, *args):
-        def is_divisible_by_16(x):
-            if hasattr(x, "data_ptr"):
-                return x.data_ptr() % JITFunction.divisibility == 0
-            elif isinstance(x, int):
-                return x % JITFunction.divisibility == 0
-            if x is None:
-                return True
-            return False
-
-        def is_divisible_by_8(x):
-            if isinstance(x, int):
-                return x % JITFunction.divisibility_8 == 0
-            if x is None:
-                return True
-            return False
-
-        divisible_by_16 = {
-            param.num
-            for param, arg in zip(self.params, args)
-            if is_divisible_by_16(arg) and not param.do_not_specialize
-        }
-        divisible_by_8 = {
-            param.num for param, arg in zip(self.params, args) if is_divisible_by_8(arg) and not param.do_not_specialize
-        }
         equal_to_1 = {
             param.num
             for param, arg in zip(self.params, args)
@@ -291,10 +260,8 @@ class JITFunction(KernelInterface[T]):
         none_args = {param.num for param, arg in zip(self.params, args) if arg is None and not param.do_not_specialize}
         ids_of_folded_args = equal_to_1 | none_args
         return namedtuple(
-            "instance_descriptor", ["divisible_by_16", "equal_to_1", "ids_of_folded_args", "divisible_by_8"]
-        )(tuple(divisible_by_16), tuple(equal_to_1), tuple(ids_of_folded_args), tuple(divisible_by_8))
-        # return _triton.code_gen.instance_descriptor(divisible_by_16,
-        # equal_to_1)
+            "instance_descriptor", ["equal_to_1", "ids_of_folded_args"]
+        )(tuple(equal_to_1), tuple(ids_of_folded_args))
 
     @staticmethod
     def _type_of(key):
@@ -400,7 +367,7 @@ class JITFunction(KernelInterface[T]):
         return device_types[0] if len(device_types) > 0 else "cuda"
 
     def run(self, *args, **kwargs):
-        from ..compiler import CompiledKernel, compile, get_arch_default_num_stages, get_arch_default_num_warps
+        from ..compiler import CompiledKernel, compile
 
         # Get a compiler-flags arg like `num_warps` and remove it from kwargs.
         def get_special_arg(name: str, default=None):
@@ -429,140 +396,49 @@ class JITFunction(KernelInterface[T]):
         assert len(bound_args.arguments) == len(self.params)
         args = [KernelArg(arg_value, param) for (_, arg_value), param in zip(bound_args.arguments.items(), self.params)]
 
-        non_constexpr_arg_values = [arg.value for arg in args if not arg.param.is_constexpr]
+        configs = (self._get_config(*[arg.value for arg in args]), )
+        constants = {
+            arg.param.num: arg.value
+            for arg in args
+            if arg.param.is_constexpr or arg.param.num in configs[0].equal_to_1 or arg.value is None
+        }
+        for i, arg in constants.items():
+            if callable(arg):
+                raise TypeError(f"Callable constexpr at index {i} is not supported")
 
-        sig_key = tuple(arg.signature_key() for arg in args if not arg.param.is_constexpr)
-        spec_key = tuple(arg.specialization_key() for arg in args if not arg.param.do_not_specialize)
-        constexpr_key = tuple(arg.value for arg in args if arg.param.is_constexpr)
+        # Build kernel signature -- doesn't include constexpr arguments.
+        signature = {
+            arg.param.num: self._type_of(self._key_of(arg.value))
+            for arg in args
+            if not arg.param.is_constexpr
+        }
 
-        assert num_ctas > 0
-        assert grid is not None
-        if callable(grid):
-            # Arguments are passed as a dict to `grid`, by contract.
-            # TODO(jlebar): In the new launch API, pass the compiler flags as a
-            # second parameter to `grid`.
-            grid = grid(dict(bound_args.arguments))
-        grid_size = len(grid)
-        grid_0 = grid[0]
-        grid_1 = grid[1] if grid_size > 1 else 1
-        grid_2 = grid[2] if grid_size > 2 else 1
-        if device_type is None:
-            device_types = [self._device_of(arg) for arg in non_constexpr_arg_values]
-            device_types = [_device_type for _device_type in device_types if _device_type != ""]
-            device_type = self._conclude_device_type(
-                device_types, [self._pinned_memory_of(arg) for arg in non_constexpr_arg_values]
-            )
-
-        device_backend = None
-        if device_type not in ["cuda"]:
-            device_backend = get_backend(device_type)
-            if device_backend is None:
-                raise ValueError("Cannot find backend for " + device_type)
-
-        if device is None:
-            if device_type in ["cuda"]:
-                device = get_current_device()
-                set_current_device(device)
-            else:
-                device = device_backend.get_current_device()
-                device_backend.set_current_device(device)
-        if stream is None and not warmup:
-            if device_type in ["cuda"]:
-                stream = get_cuda_stream(device)
-            else:
-                stream = device_backend.get_stream()
-
-        if num_warps is None:
-            num_warps = get_arch_default_num_warps(device_type)
-        if num_stages is None:
-            num_stages = get_arch_default_num_stages(device_type)
-
-        if device_type in ["cuda"]:
-            version_key = get_cuda_version_key()
-        else:
-            version_key = device_backend.get_version_key()
-        key = (
-            version_key,
-            sig_key,
-            constexpr_key,
-            spec_key,
-            num_warps,
-            num_ctas,
-            num_stages,
-            enable_warp_specialization,
-            enable_fp_fusion,
-            self.debug,
+        bin = compile(
+            self,
+            signature=signature,
+            constants=constants,
+            configs=configs,
         )
-        if extern_libs is not None:
-            key = (key, tuple(extern_libs.items()))
 
-        # Kernel is not cached; we have to compile.
-        if key not in self.cache[device]:
-            configs = (self._get_config(*[arg.value for arg in args]),)
-            constants = {
-                arg.param.num: arg.value
-                for arg in args
-                if arg.param.is_constexpr or arg.param.num in configs[0].equal_to_1 or arg.value is None
-            }
-            for i, arg in constants.items():
-                if callable(arg):
-                    raise TypeError(f"Callable constexpr at index {i} is not supported")
-
-            # Build kernel signature -- doesn't include constexpr arguments.
-            signature = {
-                arg.param.num: self._type_of(self._key_of(arg.value)) for arg in args if not arg.param.is_constexpr
-            }
-
-            if self._call_hook(
-                key,
-                signature,
-                device,
-                constants,
-                num_warps,
-                num_ctas,
-                num_stages,
-                enable_warp_specialization,
-                enable_fp_fusion,
-                extern_libs,
-                configs,
-            ):
-                return None
-
-            self.cache[device][key] = compile(
-                self,
-                signature=signature,
-                device=device,
-                constants=constants,
-                num_warps=num_warps,
-                num_ctas=num_ctas,
-                num_stages=num_stages,
-                enable_warp_specialization=enable_warp_specialization,
-                enable_fp_fusion=enable_fp_fusion,
-                extern_libs=extern_libs,
-                configs=configs,
-                debug=self.debug,
-                device_type=device_type,
-            )
-
-        bin = self.cache[device][key]
-        if not warmup:
-            bin.c_wrapper(
-                grid_0,
-                grid_1,
-                grid_2,
-                bin.num_warps,
-                bin.num_ctas,
-                bin.clusterDims[0],
-                bin.clusterDims[1],
-                bin.clusterDims[2],
-                bin.shared,
-                stream,
-                bin.cu_function,
-                CompiledKernel.launch_enter_hook,
-                CompiledKernel.launch_exit_hook,
-                bin,
-                *bin.assemble_tensormap_to_arg(non_constexpr_arg_values),
-            )
+        # bin = self.cache[device][key]
+        # if not warmup:
+        #     bin.c_wrapper(
+        #         grid_0,
+        #         grid_1,
+        #         grid_2,
+        #         bin.num_warps,
+        #         bin.num_ctas,
+        #         bin.clusterDims[0],
+        #         bin.clusterDims[1],
+        #         bin.clusterDims[2],
+        #         bin.shared,
+        #         stream,
+        #         bin.cu_function,
+        #         CompiledKernel.launch_enter_hook,
+        #         CompiledKernel.launch_exit_hook,
+        #         bin,
+        #         *bin.assemble_tensormap_to_arg(non_constexpr_arg_values),
+        #     )
         return bin
 
     def __init__(self, fn, version=None, do_not_specialize=None, debug=None, noinline=None):
