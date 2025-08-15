@@ -42,6 +42,10 @@ from triton.language.core import (
     tensor,
     tuple,
     tuple_type,
+    # NTV additions for pylance
+    program_id,
+    load,
+    store,
 )
 
 _IMPORT_FROM_TRITON: List[str] = [
@@ -119,6 +123,10 @@ __all__ = [
     "static_range",
     "warp_specialize",
     *_IMPORT_FROM_TRITON,
+    # NTV additions for pylance
+    "program_id",
+    "load",
+    "store",
 ]
 
 T = TypeVar("T")
