@@ -143,6 +143,15 @@ bool hasMatchingCTATileLayoutForSliceConcat(
   return true;
 }
 
+void ExtractSliceOp::build(OpBuilder &builder, OperationState &result,
+                          RankedTensorType resultType, Value source,
+                          ArrayRef<int64_t> static_offsets) {
+  result.addOperands(source);
+  result.addAttribute("static_offsets",
+                      builder.getDenseI64ArrayAttr(static_offsets));
+  result.addTypes(resultType);
+}
+
 LogicalResult ExtractSliceOp::verify() {
   // Basic type/rank checks.
   auto srcTypeVal = getSource().getType();
