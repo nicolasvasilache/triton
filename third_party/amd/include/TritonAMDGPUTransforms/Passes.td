@@ -129,6 +129,28 @@ def TritonAMDGPUReorderInstructions: Pass<"tritonamdgpu-reorder-instructions", "
   let dependentDialects = [];
 }
 
+def TritonAMDGPUDotSliceAndInterleave: InterfacePass<"tritonamdgpu-dot-slice-and-interleave", "mlir::FunctionOpInterface"> {
+  let summary = "Slice tt.dot and interleave with tt.local_load/tt.local_store";
+
+  let description = [{
+    This pass slices tt.dot operations into multiple pieces alongside their
+    tt.local_load producers and interleaves the resulting operations to create
+    valid schedules that can improve ILP and latency hiding. It preserves SSA
+    def-use chains and respects dominance within basic blocks.
+  }];
+
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
+
+  let options = [
+    ListOption<"targetSliceMNK", "target-slice-mnk", "int32_t",
+           "Target slice sizes [M,N,K]; 0 leaves a dim unsliced. Provide 3 integers.">,
+    Option<"loadsPerGroup", "loads-per-group", "int32_t", /*default*/"0",
+           "Reserved for future: number of local loads to group between dots">,
+    Option<"dotsPerGroup", "dots-per-group", "int32_t", /*default*/"0",
+           "Reserved for future: number of dots to group per interleave block">
+  ];
+}
+
 def TritonAMDGPUConvertToBufferOps : Pass<"tritonamdgpu-convert-buffer-ops", "mlir::ModuleOp"> {
   let summary = "Convert memory operations to buffer operations";
 

@@ -8,6 +8,7 @@ add_triton_library(TritonAMDGPUTransforms
   OptimizeDotOperands.cpp
   HoistLayoutConversions.cpp
   ReorderInstructions.cpp
+  DotSliceAndInterleave.cpp
   StreamPipeline.cpp
   MfmaGroup.cpp
   WmmaGroup.cpp
