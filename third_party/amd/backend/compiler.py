@@ -11,6 +11,9 @@ import functools
 import warnings
 from pathlib import Path
 
+use_experimental_interleave = True
+disable_thread_transpose = True
+skip_actual_experimental_interleave = False
 
 def get_min_dot_size(target: GPUTarget):
     # We fallback to use FMA and cast arguments if certain configurations is
@@ -19,11 +22,18 @@ def get_min_dot_size(target: GPUTarget):
 
 
 def is_pingpong_schedule_enabled(arch, use_async_copy):
+    # Experimental interleaving tries to avoid the need for complex ping-pong schedules.
+    if use_experimental_interleave:
+        return False
     return (arch == "gfx942" or (arch == "gfx950" and use_async_copy is True)
             ) if knobs.amd.use_block_pingpong is None else knobs.amd.use_block_pingpong
 
 
 def is_in_thread_transpose_enabled(arch):
+    # Experimental interleaving is trickier due to cross-swizzling behavior with 
+    # in_thread_transpose.
+    if use_experimental_interleave or disable_thread_transpose:
+        return False
     return (arch == "gfx942") if knobs.amd.use_in_thread_transpose is None else knobs.amd.use_in_thread_transpose
 
 
@@ -243,6 +253,11 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_reorder_instructions(pm)
         if use_block_pingpong and options.num_stages > 1:
             amd.passes.ttgpuir.add_block_pingpong(pm, options.num_stages)
+
+        # Right before ConvertToBufferOps
+        if use_experimental_interleave:
+            if not skip_actual_experimental_interleave:
+                amd.passes.ttgpuir.add_dot_slice_and_interleave(pm, [64, 64, 32], 0, 0)
 
         if knobs.amd.use_buffer_ops:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)

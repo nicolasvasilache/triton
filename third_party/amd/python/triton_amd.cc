@@ -30,6 +30,7 @@
 #include "llvm/TargetParser/TargetParser.h"
 #include <array>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <stdexcept>
 
 namespace py = pybind11;
@@ -80,6 +81,15 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_OPTION_WRAPPER_2("add_convert_to_buffer_ops",
                             mlir::createTritonAMDGPUConvertToBufferOps,
                             const std::string &, bool);
+  m.def("add_dot_slice_and_interleave",
+        [](mlir::PassManager &pm, const std::vector<int> &targetSliceMNK,
+           int loadsPerGroup, int dotsPerGroup) {
+          llvm::SmallVector<int32_t> smallVec(targetSliceMNK.begin(),
+                                              targetSliceMNK.end());
+          pm.addNestedPass<mlir::triton::FuncOp>(
+              mlir::createTritonAMDGPUDotSliceAndInterleave(
+                  {smallVec, loadsPerGroup, dotsPerGroup}));
+        });
   ADD_PASS_WRAPPER_0("add_reorder_instructions",
                      mlir::createTritonAMDGPUReorderInstructions);
   ADD_PASS_WRAPPER_0("add_fold_true_cmpi", mlir::createTritonAMDFoldTrueCmpI);
