@@ -12,6 +12,7 @@
 #include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/LogicalResult.h"
+#include <sstream>
 
 // Provide custom directive handlers for declarative assemblyFormat.
 // They must be visible before including the generated op classes.
@@ -815,18 +816,89 @@ LogicalResult MemDescSubsliceOp::verify() {
   }
 
   auto llInv = ll.invert();
+  
+  // Collect debug information in stringstream - only shown on failure
+  std::stringstream debugInfo;
+  
+  // Print linear layout information
+  debugInfo << "\n[SWIZZLING DEBUG] Linear layout input dimensions: ";
+  for (auto inDim : ll.getInDimNames()) {
+    debugInfo << inDim.str() << "(" << ll.getInDimSize(inDim) << ") ";
+  }
+  debugInfo << "\n[SWIZZLING DEBUG] Linear layout output dimensions: ";
+  for (auto outDim : ll.getOutDimNames()) {
+    debugInfo << outDim.str() << "(" << ll.getOutDimSize(outDim) << ") ";
+  }
+  debugInfo << "\n";
+  
+  // Print the swizzling encoding details if available
+  if (auto swizzled = mlir::dyn_cast<SwizzledSharedEncodingAttr>(srcTy.getEncoding())) {
+    debugInfo << "[SWIZZLING DEBUG] Swizzled shared encoding: vec=" << swizzled.getVec()
+              << ", perPhase=" << swizzled.getPerPhase()
+              << ", maxPhase=" << swizzled.getMaxPhase() << ", order=[";
+    for (auto ord : swizzled.getOrder()) {
+      debugInfo << ord << " ";
+    }
+    debugInfo << "]\n";
+  }
+  
   for (auto dim : splitDims) {
     auto kDim = mlir::StringAttr::get(ctx, "dim" + llvm::Twine(dim));
     llvm::SmallVector<std::pair<mlir::StringAttr, int32_t>> namedOffsets;
     for (auto d : standardOutDimNames(ctx, srcTy.getRank())) {
       namedOffsets.push_back({d, 0});
     }
+    
+    debugInfo << "[SWIZZLING DEBUG] Analyzing split on dimension " << dim 
+              << " from size " << srcTy.getDimSize(dim) 
+              << " to " << dstTy.getDimSize(dim) << "\n";
+    
     for (int dimSize = dstTy.getDimSize(dim); dimSize < srcTy.getDimSize(dim);
          dimSize *= 2) {
       namedOffsets[dim] = {kDim, dimSize};
-      if (!llvm::isPowerOf2_32(llInv.apply(namedOffsets)[0].second)) {
+      auto result = llInv.apply(namedOffsets);
+      int32_t mappedValue = result[0].second;
+      bool isPowerOf2 = llvm::isPowerOf2_32(mappedValue);
+      
+      debugInfo << "[SWIZZLING DEBUG] Testing split at dimSize=" << dimSize 
+                << " -> mapped value=" << mappedValue 
+                << " (isPowerOf2=" << (isPowerOf2 ? "true" : "false") << ")\n";
+      
+      if (!isPowerOf2) {
+        // Add detailed failure information to debug stream
+        debugInfo << "[SWIZZLING DEBUG] FAILURE DETAILS:\n";
+        debugInfo << "[SWIZZLING DEBUG] Failed namedOffsets: ";
+        for (auto& offset : namedOffsets) {
+          debugInfo << offset.first.str() << "=" << offset.second << " ";
+        }
+        debugInfo << "\n";
+        
+        debugInfo << "[SWIZZLING DEBUG] Full llInv.apply result: ";
+        for (auto& res : result) {
+          debugInfo << res.first.str() << "=" << res.second << " ";
+        }
+        debugInfo << "\n";
+        
+        // Suggest alternative tile sizes
+        debugInfo << "[SWIZZLING DEBUG] SUGGESTIONS:\n";
+        debugInfo << "[SWIZZLING DEBUG] Try tile sizes that are powers of 2 and multiples of the swizzling period\n";
+        if (auto swizzled = mlir::dyn_cast<SwizzledSharedEncodingAttr>(srcTy.getEncoding())) {
+          int maxPhase = swizzled.getMaxPhase();
+          debugInfo << "[SWIZZLING DEBUG] For maxPhase=" << maxPhase 
+                    << ", consider tile sizes that are multiples of " << maxPhase << "\n";
+          debugInfo << "[SWIZZLING DEBUG] Safe tile sizes might be: ";
+          for (int safe = maxPhase; safe <= 256; safe *= 2) {
+            debugInfo << safe << " ";
+          }
+          debugInfo << "\n";
+        }
+        
+        // Now emit the error with all the collected debug information
         return emitError(
-            "We don't support splitting along the swizzling pattern");
+            "We don't support splitting along the swizzling pattern. "
+            "Split on dimension ") << dim << " at size " << dimSize 
+            << " maps to non-power-of-2 value " << mappedValue 
+            << ".\n" << debugInfo.str() << "\n" << *(this->getOperation());
       }
     }
   }
