@@ -760,6 +760,9 @@ public:
 
   std::string toString() const;
 
+  // Return the underlying binary matrix representation as a human-readable string
+  std::string toPrettyBinaryString() const;
+
   friend bool operator==(const LinearLayout &lhs, const LinearLayout &rhs);
   friend bool operator!=(const LinearLayout &lhs, const LinearLayout &rhs) {
     return !(lhs == rhs);

@@ -13,6 +13,7 @@
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
+#include "linear_layout.h"
 
 using namespace mlir;
 namespace py = pybind11;
@@ -655,4 +656,7 @@ void init_gluon_ir(py::module &&m) {
                                          std::vector<int> &requestedRegisters) {
         self.setRequestedRegisters(requestedRegisters);
       });
+
+  // Define LinearLayout bindings
+  defineLinearLayout(m);
 }

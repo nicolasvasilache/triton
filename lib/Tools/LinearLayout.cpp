@@ -1142,13 +1142,37 @@ LinearLayout LinearLayout::unsqueezeIn(StringAttr dim) const {
 
 LinearLayout LinearLayout::unsqueezeOut(StringAttr dim) const {
   assert(getOutDimSize(dim) == 1);
+  
+  // Find the index of the output dimension to remove
+  int32_t outDimIndex = getOutDimIndex(dim);
+  
+  // Create new output dimensions without the removed dimension
   SmallVector<std::pair<StringAttr, int32_t>> newOutDims;
   for (auto [outDim, outDimSize] : getOutDims()) {
     if (outDim != dim) {
       newOutDims.push_back({outDim, outDimSize});
     }
   }
-  return LinearLayout(bases, newOutDims, isSurjective());
+  
+  // Create new bases with the corresponding component removed from each basis vector
+  LinearLayout::BasesT newBases;
+  for (auto &[inDim, inDimBases] : getBases()) {
+    auto &newInDimBases = newBases[inDim];
+    for (auto &basis : inDimBases) {
+      std::vector<int32_t> newBasis;
+      newBasis.reserve(basis.size() - 1);  // Reserve space for efficiency
+      for (int32_t i = 0; i < static_cast<int32_t>(basis.size()); i++) {
+        if (i != outDimIndex) {
+          newBasis.push_back(basis[i]);
+        }
+      }
+      // Verify the new basis has the correct size
+      assert(newBasis.size() == newOutDims.size());
+      newInDimBases.push_back(std::move(newBasis));
+    }
+  }
+  
+  return LinearLayout(std::move(newBases), newOutDims, isSurjective());
 }
 
 llvm::MapVector<StringAttr, int32_t>
@@ -1298,6 +1322,93 @@ std::string LinearLayout::toString() const {
            "\n";
   }
   ret += "where out dims are: " + outDimsStr;
+  return ret;
+}
+
+std::string LinearLayout::toPrettyBinaryString() const {
+  int numRows = getTotalOutDimSizeLog2();
+  int numCols = getTotalInDimSizeLog2();
+
+  if (numRows == 0 || numCols == 0) {
+    return "\n(empty binary matrix)";
+  }
+
+  std::unique_ptr<uint64_t[]> matrix = getMatrix(*this);
+  std::string ret = "\nBinary matrix representation (" +
+                    std::to_string(numRows) + " rows x " +
+                    std::to_string(numCols) + " cols):\n";
+
+  // Add header with input dimension names and bit positions
+  ret += "Input dimensions (bit positions): ";
+  int c = 0;
+  for (StringAttr inDim : getInDimNames()) {
+    int inDimSize = getInDimSizeLog2(inDim);
+    ret += inDim.str() + "[";
+    for (int i = 0; i < inDimSize; i++) {
+      if (i > 0)
+        ret += ",";
+      ret += std::to_string(c++);
+    }
+    ret += "] ";
+  }
+  ret += "\n";
+
+  // Create column separator positions (after each input dimension)
+  std::vector<int> colSeparators;
+  int colPos = 0;
+  for (StringAttr inDim : getInDimNames()) {
+    colPos += getInDimSizeLog2(inDim);
+    colSeparators.push_back(colPos);
+  }
+
+  // Add output dimension labels and matrix with separators
+  int r = 0;
+  int padding = 16;
+  for (auto [outDimIdx, outDim] : llvm::enumerate(getOutDimNames())) {
+    int outDimSize = getOutDimSizeLog2(outDim);
+    for (int i = 0; i < outDimSize; i++) {
+      // Create padded label (`padding` characters total)
+      std::string label = outDim.str() + "[" + std::to_string(i) + "]:";
+      if (label.length() < padding) {
+        label += std::string(padding - label.length(), ' ');
+      } else if (label.length() > padding) {
+        label = label.substr(0, (padding - 3)) + "...";
+      }
+      ret += label + " ";
+
+      // Print matrix row with vertical separators
+      for (int c = 0; c < numCols; c++) {
+        ret += ((matrix[r] & (1ULL << c)) != 0 ? "1" : "0");
+
+        // Add vertical separator if this column position is at the end of an
+        // input dimension
+        if (std::find(colSeparators.begin(), colSeparators.end(), c + 1) !=
+                colSeparators.end() &&
+            c + 1 < numCols) {
+          ret += "|";
+        }
+      }
+      ret += "\n";
+      r++;
+    }
+
+    // Add horizontal separator after each output dimension (except the last)
+    if (outDimIdx < getNumOutDims() - 1) {
+      ret += std::string(
+          17, ' '); // `padding` chars + 1 space to align with padded labels
+      for (int c = 0; c < numCols; c++) {
+        ret += "-";
+        // Add separator marker at column boundaries
+        if (std::find(colSeparators.begin(), colSeparators.end(), c + 1) !=
+                colSeparators.end() &&
+            c + 1 < numCols) {
+          ret += "+";
+        }
+      }
+      ret += "\n";
+    }
+  }
+
   return ret;
 }
 
