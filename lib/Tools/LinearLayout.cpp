@@ -18,7 +18,6 @@
 #define DEBUG_TYPE "linear_layout"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
-#define LERR(X) llvm::errs() << X;
 
 #if defined(_MSC_VER) && !defined(__clang__)
 // from https://gist.github.com/pps83/3210a2f980fd02bb2ba2e5a1fc4a2ef0
@@ -962,19 +961,6 @@ std::unique_ptr<uint64_t[]> concatMatrices(const LinearLayout &A,
   return concat;
 }
 
-// Pretty prints a binary matrix to a string
-std::string ppMatrix(uint64_t *matrix, uint64_t rows, uint64_t cols) {
-  std::string ret = "\nBinary matrix representation (" + std::to_string(rows) +
-                    " rows x " + std::to_string(cols) + " cols):\n";
-  for (uint64_t i = 0; i < rows; i++) {
-    for (uint64_t c = 0; c < cols; ++c) {
-      ret += ((matrix[i] >> c) & 1) ? "1" : "0";
-    }
-    ret += "\n";
-  }
-  return ret;
-}
-
 LinearLayout lstsq(const LinearLayout &A, const LinearLayout &B) {
   // Solve the least square system AX = B
   // and return the least square solution X by computing RREF and setting
@@ -989,12 +975,8 @@ LinearLayout lstsq(const LinearLayout &A, const LinearLayout &B) {
   int numColsB = B.getTotalInDimSizeLog2();
   int numCols = numColsA + numColsB;
   std::unique_ptr<uint64_t[]> combinedMat = concatMatrices(A, B);
-
-  auto m = combinedMat.get();
-  LERR("combinedMat: " << ppMatrix(m, numRows, numCols) << "\n");
-  f2reduce::inplace_rref_strided(m, numRows, numCols,
+  f2reduce::inplace_rref_strided(combinedMat.get(), numRows, numCols,
                                  /*stride=*/1);
-  LERR("RREF combinedMat: " << ppMatrix(m, numRows, numCols) << "\n");
 
   // Compute the pivot columns
   // Since A and B have the same image, each row will either have a pivot
@@ -1018,7 +1000,6 @@ LinearLayout lstsq(const LinearLayout &A, const LinearLayout &B) {
     int row = pivotRowOfCol[c];
     retMat[c] = (row == -1) ? 0 : (combinedMat[row] >> numColsA);
   }
-  LERR("retMat: " << ppMatrix(retMat.get(), numRows, numCols) << "\n");
 
   // We need names for the in/out dim of the flattened layout we're going to
   // read off from `m`.  These could be anything, doesn't matter.
@@ -1118,16 +1099,7 @@ LinearLayout LinearLayout::invertAndCompose(const LinearLayout &outer) const {
   assert((ANonIdentityInDims.empty()) == (BNonIdentityInDims.empty()));
   bool isEmpty = ANonIdentityInDims.empty();
 
-  int nrA = A.getTotalOutDimSizeLog2();
-  int ncA = A.getTotalInDimSizeLog2();
-  int nrB = B.getTotalOutDimSizeLog2();
-  int ncB = B.getTotalInDimSizeLog2();
-  LERR("AReduced: " << ppMatrix(getMatrix(AReduced).get(), nrA, ncA)
-                    << "\n");
-  LERR("BReduced: " << ppMatrix(getMatrix(BReduced).get(), nrB, ncB)
-                    << "\n");
   auto ret = isEmpty ? LinearLayout::empty() : lstsq(AReduced, BReduced);
-  LERR("ret: " << ret.toPrettyBinaryString() << "\n");
 
   // TODO(Lezcano): We should return the reduced layout instead of re-adding the
   // identity maps. With this, we'll be able to kill `minimalCvtLayout`
