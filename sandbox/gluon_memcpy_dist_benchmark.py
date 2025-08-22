@@ -1,10 +1,13 @@
-import torch
-import triton
+import os
 from functools import partial
-from triton.experimental import gluon
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from triton.experimental.gluon import language as gl
 
-from gluon_memcpy_base import memcpy_1d_kernel, memcpy_2d_persistent_kernel
+from gluon_memcpy_benchmark import get_throughput, memcpy_1d_impl, memcpy_2d_persistent_impl
+from dist_sync import do_dist_synchronized_bench, setup, teardown
 
 torch.manual_seed(0)
 warp_size = 64
@@ -23,83 +26,11 @@ xnumel = 2 << 27
 # 2^31 -> 87.5% elements are wrong.
 # 2^32 -> not enough memory for all tensors
 
-def get_throughput(input, ms):
-    tbytes = (2 * input.numel() * input.element_size()) / (1024 ** 4)
-    return tbytes / (ms * 1e-3)
+def bench_memcpy_1d_impl(rank, world_size, tensor_size, dtype):
+    device = setup(rank, world_size)
 
-def bench_wrapper(impl, input, output, str_to_print):
-    fn = lambda: impl(input, output)
-    ms = triton.testing.do_bench(fn, warmup=10, rep=100, return_mode="median")
-    throughput = get_throughput(input, ms)
-    print(f"{throughput:.3f} TB/s in {ms:.3f}ms {str_to_print}\t")
-
-def memcpy_1d_impl(
-        input,
-        output,
-        num_warps,
-        XBLOCK,
-        layout,
-        masked: bool = True,
-        use_buffer_instructions: bool = True,
-    ):
-    xnumel = input.numel()
-    grid = (triton.cdiv(xnumel, XBLOCK), )
-    compiled_kernel = memcpy_1d_kernel[grid]( # type: ignore
-        input,
-        output,
-        xnumel,
-        XBLOCK,
-        layout,
-        masked,
-        use_buffer_instructions,
-        # JIT compile-time configuration special variable
-        num_warps=num_warps
-    )
-    return compiled_kernel
-
-def memcpy_2d_persistent_impl(
-        input,
-        output,
-        num_warps,
-        num_cus,
-        BLOCK_SIZE_N,
-        layout,
-        masked: bool = True,
-        use_buffer_instructions: bool = True,
-        row_cu_shift: int = 0
-    ):
-    """
-    2D memcpy implementation using a persistent kernel.
-    """
-    M, N = input.shape
-    grid = (num_cus,)
-    compiled_kernel = memcpy_2d_persistent_kernel[grid](  # type: ignore
-        input,
-        output,
-        M,
-        N,
-        input.stride(0),
-        output.stride(0),
-        input.stride(1),
-        output.stride(1),
-        BLOCK_SIZE_N,
-        layout,
-        masked,
-        use_buffer_instructions,
-        num_cus,
-        row_cu_shift,
-        # JIT compile-time configuration special variable
-        num_warps=num_warps
-    )
-    return compiled_kernel
-
-def benchmark_memcpy_1d():
-    print("vector_size vs. Throughput")
-    print("================")
-
-    dtype = torch.float32
-    input = torch.randn(xnumel, device="cuda", dtype=dtype)
-    output = torch.empty_like(input)
+    input = torch.randn(tensor_size, dtype=dtype).to(device)
+    output = torch.empty_like(input).to(device)
 
     def do(XBLOCK, vector_size, num_warps, check=True):
         max_vector_size = XBLOCK // (num_warps * warp_size)
@@ -132,31 +63,35 @@ def benchmark_memcpy_1d():
             impl(input, output)
             torch.testing.assert_close(input, output)
 
-        bench_wrapper(impl, input, output, config_str)
+        def bench_wrapper(device, impl, input, output, str_to_print):
+            fn = lambda: impl(input, output)
+            ms = do_dist_synchronized_bench(fn, device, warmup=10, rep=100, return_mode="median")
+            throughput = get_throughput(input, ms)
+            print(f"device {device} -> {throughput:.3f} TB/s in {ms:.3f}ms {str_to_print}\t")
 
-    bench_one = False
+        bench_wrapper(device, impl, input, output, config_str)
+
+    bench_one = True
     if bench_one:
         # 4TF/s on MI300x
         XBLOCK, num_warps, vector_size = 2048, 4, 4
-        do(XBLOCK, vector_size, num_warps, check=True)
+        do(XBLOCK, vector_size, num_warps, check=False)
     else:
         # we are voluntarily testing some outliers here where the vector size is too big
         # to make sense perf-wise
         for XBLOCK in (128, 256, 512, 1024, 2048, 4096, 8192):
             for vector_size in (1, 2, 4, 8, 16, 32):
                 for num_warps in (1, 2, 4, 8):
-                    do(XBLOCK, vector_size, num_warps, check=True)
+                    do(XBLOCK, vector_size, num_warps, check=False)
+
+    teardown(rank, device)
 
 
-def benchmark_memcpy_2d():
-    print("vector_size vs. Throughput (2D)")
-    print("================")
+def bench_memcpy_2d_impl(rank, world_size, tensor_size, dtype):
+    device = setup(rank, world_size)
 
-    M = 4096
-    N = xnumel // M
-    dtype = torch.float32
-    input = torch.randn(M, N, device="cuda", dtype=dtype)
-    output = torch.empty_like(input)
+    input = torch.randn(tensor_size, dtype=dtype).to(device)
+    output = torch.empty_like(input).to(device)
 
     def do(BLOCK_SIZE_N, vector_size, num_warps, num_cus, row_cu_shift, check=True):
         max_vector_size = BLOCK_SIZE_N // (num_warps * warp_size)
@@ -194,9 +129,15 @@ def benchmark_memcpy_2d():
             impl(input, output)
             torch.testing.assert_close(input, output)
 
-        bench_wrapper(impl, input, output, config_str)
+        def bench_wrapper(device, impl, input, output, str_to_print):
+            fn = lambda: impl(input, output)
+            ms = do_dist_synchronized_bench(fn, device, warmup=10, rep=100, return_mode="median")
+            throughput = get_throughput(input, ms)
+            print(f"device {device} -> {throughput:.3f} TB/s in {ms:.3f}ms {str_to_print}\t")
 
-    bench_one = False
+        bench_wrapper(device, impl, input, output, config_str)
+
+    bench_one = True
     if bench_one:
         # Example: 2D memcpy with reasonable parameters
         BLOCK_SIZE_N, num_warps, vector_size = 4096, 4, 2
@@ -206,15 +147,42 @@ def benchmark_memcpy_2d():
     else:
         for BLOCK_SIZE_N in (512, 1024, 2048, 4096, 8192):
             # Avoid unmasked overflows
-            if not masked and N % BLOCK_SIZE_N != 0:
+            if not masked and input.shape[1] % BLOCK_SIZE_N != 0:
                 continue
             for vector_size in (1, 2, 4, 8, 16, 32):
                 for num_warps in (1, 2, 4, 8):
                     row_cu_shift = 0
                     # for row_cu_shift in range(num_xcds):
                     shift = (row_cu_shift * torch.randint(0, 101, (1,)).item()) % num_cus
-                    do(BLOCK_SIZE_N, vector_size, num_warps, num_cus, row_cu_shift=shift, check=True)
-  
+                    do(BLOCK_SIZE_N, vector_size, num_warps, num_cus, row_cu_shift=shift, check=False)
+
+    teardown(rank, device)
+
+    
+def bench_memcpy_1d():
+    world_size = min(8, torch.cuda.device_count())
+    
+    mp.spawn(
+        bench_memcpy_1d_impl,
+        args=(world_size, (xnumel, ), torch.float32),
+        nprocs=world_size,
+        join=True
+    )
+
+    
+def bench_memcpy_2d():
+    world_size = min(8, torch.cuda.device_count())
+    
+    M = 4096
+    N = xnumel // M
+    mp.spawn(
+        bench_memcpy_2d_impl,
+        args=(world_size, (M, N), torch.float32),
+        nprocs=world_size,
+        join=True
+    )
+
+
 if __name__ == "__main__":
-    benchmark_memcpy_1d()
-    benchmark_memcpy_2d()
+    bench_memcpy_1d()
+    bench_memcpy_2d()
