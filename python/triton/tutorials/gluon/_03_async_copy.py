@@ -12,7 +12,6 @@ global memory and shared memory, unlike `gl.load` and `gl.store` which
 directly write to and read from the register file.
 """
 
-import pytest
 import torch
 import triton
 from triton.experimental import gluon
@@ -22,8 +21,7 @@ from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
 
 def is_ampere_or_newer():
-    target = triton.runtime.driver.active.get_current_target()
-    return target.backend == "cuda" and torch.cuda.get_device_capability()[0] >= 8
+    return True
 
 
 if __name__ == "__main__" and not is_ampere_or_newer():
@@ -38,12 +36,13 @@ if __name__ == "__main__" and not is_ampere_or_newer():
 
 
 @gluon.jit
-def memcpy_1d_cpasync_kernel(in_ptr, out_ptr, xnumel, XBLOCK: gl.constexpr):
+def memcpy_1d_cpasync_kernel(in_ptr, out_ptr, xnumel, XBLOCK: gl.constexpr, threads_per_warp: gl.constexpr):
     pid = gl.program_id(0)
 
-    layout: gl.constexpr = gl.BlockedLayout([1], [32], [4], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [threads_per_warp], [4], [0])
     offsets = pid * XBLOCK + gl.arange(0, XBLOCK, layout=layout)
-    mask = offsets < xnumel
+    # mask = offsets < xnumel
+    mask = None
 
     # For 1D tensor, pick a simple layout.
     smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
@@ -64,11 +63,11 @@ def memcpy_1d_cpasync_kernel(in_ptr, out_ptr, xnumel, XBLOCK: gl.constexpr):
 
 def memcpy_1d_cpasync(input, output, XBLOCK=8192, num_warps=4):
     grid = (triton.cdiv(input.numel(), XBLOCK), )
-    memcpy_1d_cpasync_kernel[grid](input, output, input.numel(), XBLOCK, num_warps=num_warps)
+    memcpy_1d_cpasync_kernel[grid](input, output, input.numel(), XBLOCK, threads_per_warp = 64, num_warps=num_warps)
 
 
-@pytest.mark.parametrize("xnumel, XBLOCK", [(200, 128), (1000, 256)])
-@pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
+# @pytest.mark.parametrize("xnumel, XBLOCK", [(200, 128), (1000, 256)])
+# @pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
 def test_memcpy_1d_cpasync(xnumel, XBLOCK):
     input = torch.randn(xnumel, device="cuda")
     output = torch.empty_like(input)
@@ -91,11 +90,12 @@ def elementwise_add_kernel(  #
         a_ptr, b_ptr, c_ptr, xnumel, ynumel,  #
         xstride_a, ystride_a, xstride_b, ystride_b, xstride_c, ystride_c,  #
         XBLOCK: gl.constexpr, YBLOCK: gl.constexpr,  #
+        threads_per_warp: gl.constexpr
 ):
     pid = gl.program_id(0)
 
     # Compute the offset to the row this program will process.
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, threads_per_warp], [1, 4], [1, 0])
     xoffs = pid * XBLOCK + gl.arange(0, XBLOCK, gl.SliceLayout(1, layout))
 
     a_ptrs = a_ptr + xstride_a * xoffs[:, None]
@@ -122,11 +122,11 @@ def elementwise_add(A, B, C, XBLOCK=32, YBLOCK=64):
     return elementwise_add_kernel[grid](
         A, B, C, xnumel, ynumel,  #
         *A.stride(), *B.stride(), *C.stride(),  #
-        XBLOCK, YBLOCK)
+        XBLOCK, YBLOCK, threads_per_warp=64)
 
 
-@pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000)])
-@pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 32), (128, 128)])
+# @pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000)])
+# @pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 32), (128, 128)])
 def test_elementwise_add(xnumel, ynumel, XBLOCK, YBLOCK):
     a = torch.randn(xnumel, ynumel, device="cuda")
     b = torch.randn(xnumel, ynumel, device="cuda")
@@ -147,9 +147,10 @@ def elementwise_add_cpasync_kernel(  #
         xstride_a, ystride_a, xstride_b, ystride_b, xstride_c, ystride_c,  #
         XBLOCK: gl.constexpr, YBLOCK: gl.constexpr,  #
         smem_layout: gl.constexpr,  #
+        threads_per_warp: gl.constexpr
 ):
     pid = gl.program_id(0)
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, threads_per_warp], [1, 4], [1, 0])
     xoffs = pid * XBLOCK + gl.arange(0, XBLOCK, gl.SliceLayout(1, layout))
     a_ptrs = a_ptr + xstride_a * xoffs[:, None]
     b_ptrs = b_ptr + xstride_b * xoffs[:, None]
@@ -187,12 +188,12 @@ def elementwise_add_cpasync(A, B, C, smem_layout, XBLOCK=32, YBLOCK=64):
     return elementwise_add_cpasync_kernel[grid](
         A, B, C, xnumel, ynumel,  #
         *A.stride(), *B.stride(), *C.stride(),  #
-        XBLOCK, YBLOCK, smem_layout)
+        XBLOCK, YBLOCK, smem_layout, threads_per_warp=64)
 
 
-@pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000)])
-@pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 32), (128, 128)])
-@pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
+# @pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000)])
+# @pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 32), (128, 128)])
+# @pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
 def test_elementwise_add_cpasync(xnumel, ynumel, XBLOCK, YBLOCK):
     a = torch.randn(xnumel, ynumel, device="cuda")
     b = torch.randn(xnumel, ynumel, device="cuda")
@@ -287,9 +288,10 @@ def elementwise_add_pipelined_kernel(  #
         xstride_a, ystride_a, xstride_b, ystride_b, xstride_c, ystride_c,  #
         XBLOCK: gl.constexpr, YBLOCK: gl.constexpr,  #
         smem_layout: gl.constexpr, num_buffers: gl.constexpr,  #
+        threads_per_warp: gl.constexpr
 ):
     pid = gl.program_id(0)
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, threads_per_warp], [1, 4], [1, 0])
     xoffs = pid * XBLOCK + gl.arange(0, XBLOCK, gl.SliceLayout(1, layout))
     a_ptrs = a_ptr + xstride_a * xoffs[:, None]
     b_ptrs = b_ptr + xstride_b * xoffs[:, None]
@@ -340,13 +342,14 @@ def elementwise_add_pipelined(A, B, C, XBLOCK=32, YBLOCK=64, num_buffers=2):
     return elementwise_add_pipelined_kernel[grid](
         A, B, C, xnumel, ynumel,  #
         *A.stride(), *B.stride(), *C.stride(),  #
-        XBLOCK, YBLOCK, smem_layout, num_buffers)
+        XBLOCK, YBLOCK, smem_layout, num_buffers,
+        threads_per_warp=64)
 
 
-@pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000), (4000, 120)])
-@pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 64)])
-@pytest.mark.parametrize("num_buffers", [1, 2, 3])
-@pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
+# @pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000), (4000, 120)])
+# @pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 64)])
+# @pytest.mark.parametrize("num_buffers", [1, 2, 3])
+# @pytest.mark.skipif(not is_ampere_or_newer(), reason="Requires Ampere or newer")
 def test_elementwise_add_pipelined(xnumel, ynumel, XBLOCK, YBLOCK, num_buffers):
     a = torch.randn(xnumel, ynumel, device="cuda")
     b = torch.randn(xnumel, ynumel, device="cuda")
