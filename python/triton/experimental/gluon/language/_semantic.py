@@ -405,3 +405,43 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         if default_results is None:
             return
         return tuple(unflatten_ir_values(mlir_results, [r.type for r in default_results]))
+
+    #################################################################################
+    # Sugaring
+    #################################################################################
+    def arange_nd(self, starts, ends, strides, layout=None):
+        """
+        Generate an n-d sequence tensor with values in [starts, ends) using a specified layout.
+
+        Args:
+            starts (List[int]): Inclusive starts of the sequence.
+            ends (List[int]): Exclusive ends of the sequence.
+            layout (DistributedLayout): The layout of the output tensor. Defaults to AutoLayout.
+
+        Returns:
+            tensor: An nD tensor containing sequential values.
+
+        Example usage:
+        ```
+            # 2-D layout without arange_nd
+            a_offsets_m = gl.arange(0, BLOCK_M, layout=gl.SliceLayout(dim=1, parent=A.global_layout))
+            a_offsets_n = gl.arange(0, BLOCK_N, layout=gl.SliceLayout(dim=0, parent=A.global_layout))
+            a_offsets = a_offsets_m[:, None] * A.strides[1] + a_offsets_n[None, :] * A.strides[0]
+
+            # 2-D layout with arange_nd
+            a_offsets = gl.arange_nd([0, 0], [BLOCK_M, BLOCK_N], A.strides)
+        ```
+        """
+        assert len(starts) == len(ends) == len(strides), "starts, ends, and strides must have the same length"
+        rank = len(starts)
+        res = None
+        for index, (start, end, stride) in enumerate(zip(starts, ends, strides)):
+            l = layout
+            for i in range(rank):
+                l = SliceLayout(dim=i, parent=l) if i != index else l
+            rg = self.arange(start, end, l)
+            for i in reversed(range(rank)):
+                rg = self.expand_dims(rg, i) if i != index else rg
+            mul = self.mul(rg, stride, sanitize_overflow=True)
+            res = self.add(res, mul, sanitize_overflow=True) if res is not None else mul
+        return res

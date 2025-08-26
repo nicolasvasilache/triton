@@ -488,3 +488,23 @@ def thread_barrier(_semantic=None):
     Insert a barrier to synchronize threads within a CTA.
     """
     return _semantic.debug_barrier()
+
+@builtin
+def arange_nd(starts, ends, strides, layout, _semantic=None):
+    """
+    Generate an n-d sequence tensor with values in [starts, ends) using a specified layout.
+
+    Args:
+        starts (List[int]): Inclusive starts of the sequence.
+        ends (List[int]): Exclusive ends of the sequence.
+        layout (DistributedLayout): The layout of the output tensor.
+
+    Returns:
+        tensor: An nD tensor containing sequential values.
+    """
+    assert len(starts) == len(ends) == len(strides), "starts, ends, and strides must have the same length"
+    starts = [_unwrap_if_constexpr(start) for start in starts]
+    ends = [_unwrap_if_constexpr(end) for end in ends]
+    strides = [_unwrap_if_constexpr(stride) for stride in strides]
+    layout = _unwrap_if_constexpr(layout)
+    return _semantic.arange_nd(starts, ends, strides, layout)
