@@ -6,6 +6,7 @@ import torch
 
 import triton
 import triton.language as tl
+from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon as gluon
 
 from triton._utils import validate_block_shape, canonicalize_dtype, get_primitive_bitwidth
@@ -26,10 +27,9 @@ def torch_to_triton_dtype(torch_dtype):
         return tl.int64
     else:
         raise ValueError(f"Unsupported dtype: {torch_dtype}")
-
+@aggregate
 @dataclass
 class TensorDescriptor:
-    base: torch.Tensor
     dtype: tl.dtype
     # WARNING: because of https://github.com/triton-lang/triton/pull/7239/files#diff-a94d24c42ec01a10430ef002dabce1e275f194ead5123b418d518fbf92a6c4a0R1306
     # we have to use tuple[int] instead of List[int]
@@ -39,9 +39,9 @@ class TensorDescriptor:
     #    gl.arange_nd([0, 0], A.block_shape, A.strides, layout=A.global_layout)
     # ```
     # will fail.
-    shape: tuple[int]
-    strides: tuple[int]
-    block_shape: tuple[int]
+    shape: tl.tuple
+    strides: tl.tuple
+    block_shape: tl.tuple
     global_layout: gl.BlockedLayout
     shared_layout: gl.SwizzledSharedLayout
 
@@ -50,8 +50,6 @@ class TensorDescriptor:
         assert len(self.strides) == rank, f"rank mismatch: {self}"
         assert len(self.block_shape) == rank, f"rank mismatch: {self}"
         assert rank > 0, "rank must not be zero"
-        assert rank <= 5, "rank cannot be more than 5"
-        assert self.base.data_ptr() % 16 == 0, "base must be 16-byte aligned"
         validate_block_shape(self.block_shape)
         dtype_str = canonicalize_dtype(self.dtype)
         elem_bytes = get_primitive_bitwidth(dtype_str) // 8
@@ -64,28 +62,27 @@ class TensorDescriptor:
                     global_layout: gl.BlockedLayout,
                     shared_layout: gl.SwizzledSharedLayout):
         return TensorDescriptor(
-            tensor,
             torch_to_triton_dtype(tensor.dtype),
-            tuple(tensor.shape),
-            tuple(tensor.stride()),
-            tuple(block_shape),
+            tl.tuple(tensor.shape),
+            tl.tuple(tensor.stride()),
+            tl.tuple(block_shape),
             global_layout,
             shared_layout,
         )
 
     def __hash__(self):
         return hash((
-            self.base.dtype,
-            tuple(self.shape),
-            tuple(self.strides),
-            tuple(self.block_shape),
+            self.dtype,
+            tl.tuple(self.shape),
+            tl.tuple(self.strides),
+            tl.tuple(self.block_shape),
             self.global_layout,
             self.shared_layout,
         ))
 
 
 @gluon.jit
-def arange_nd_from_blocked_descriptor(blocked_desc: gl.constexpr):
+def arange_nd_from_blocked_descriptor(blocked_desc: TensorDescriptor):
     return gl.arange_nd((0, ) * len(blocked_desc.shape), blocked_desc.block_shape, blocked_desc.strides, layout=blocked_desc.global_layout) # type: ignore
 
 @gluon.jit
@@ -101,11 +98,9 @@ def arange_nd_from_blocked_descriptor(blocked_desc: gl.constexpr):
 # a_ptr = tl.cast(A.data_ptr(), tl.pointer_type(A.dtype))
 # b_ptr = tl.cast(B.data_ptr(), tl.pointer_type(B.dtype))
 
-def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr): 
+def copy_kernel(a_ptr, b_ptr, A: TensorDescriptor, B: TensorDescriptor): 
     gl.static_assert(len(A.shape) == 2, f"A must be rank 2 but got {len(A.shape)} in {A}") # type: ignore
     gl.static_assert(len(B.shape) == 2, f"B must be rank 2 but got {len(B.shape)} in {B}") # type: ignore
-
-    rank: gl.constexpr = len(A.shape) # type: ignore
 
     M : gl.constexpr = A.shape[0] # type: ignore
     N : gl.constexpr = A.shape[1] # type: ignore
