@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+import tempfile
 from typing import List, Any
 
 import torch
@@ -14,7 +15,6 @@ from triton.backends.compiler import GPUTarget
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon._runtime import GluonASTSource
 
-
 # Convert PyTorch dtype to Triton dtype
 def torch_to_triton_dtype(torch_dtype):
     if torch_dtype == torch.float32:
@@ -27,18 +27,11 @@ def torch_to_triton_dtype(torch_dtype):
         return tl.int64
     else:
         raise ValueError(f"Unsupported dtype: {torch_dtype}")
+
 @aggregate
 @dataclass
 class TensorDescriptor:
     dtype: tl.dtype
-    # WARNING: because of https://github.com/triton-lang/triton/pull/7239/files#diff-a94d24c42ec01a10430ef002dabce1e275f194ead5123b418d518fbf92a6c4a0R1306
-    # we have to use tuple[int] instead of List[int]
-    # Otherwise, consecutive lists get flattened into a single list of arguments
-    # and calling e.g.
-    # ```
-    #    gl.arange_nd([0, 0], A.block_shape, A.strides, layout=A.global_layout)
-    # ```
-    # will fail.
     shape: tl.tuple
     strides: tl.tuple
     block_shape: tl.tuple
@@ -51,8 +44,6 @@ class TensorDescriptor:
         assert len(self.block_shape) == rank, f"rank mismatch: {self}"
         assert rank > 0, "rank must not be zero"
         validate_block_shape(self.block_shape)
-        dtype_str = canonicalize_dtype(self.dtype)
-        elem_bytes = get_primitive_bitwidth(dtype_str) // 8
         assert isinstance(self.global_layout, gl.BlockedLayout), "Layout must be gl.BlockedLayout"
         assert isinstance(self.shared_layout, gl.SwizzledSharedLayout), "Layout must be gl.SwizzledSharedLayout"
 
@@ -85,20 +76,21 @@ class TensorDescriptor:
 def arange_nd_from_blocked_descriptor(blocked_desc: TensorDescriptor):
     return gl.arange_nd((0, ) * len(blocked_desc.shape), blocked_desc.block_shape, blocked_desc.strides, layout=blocked_desc.global_layout) # type: ignore
 
-@gluon.jit
 # To accept a non-static pointer, we have to pass a_ptr as a non-constexpr.
 # Our custom TensorDescriptor object is not supported and is unlikely to every be.
-# Passing it as a constexpr seems enough to appeaseGluonASTSource and the parser.
+# Passing it as a constexpr seems enough to appease GluonASTSource and the parser.
 #
 # We are lying to the type system, A and B are actually TensorDescriptor that
-# masquerade as a constexpr. So we sprinkle a bunch of type: ignore.
+# masquerade as a constexpr. So we sprinkle a bunch of type: ignore for now.
 #
 # Older code to convert int64 addresses to proper pointer types
 # This is useless because we have to decouple a_ptr from A.
-# a_ptr = tl.cast(A.data_ptr(), tl.pointer_type(A.dtype))
-# b_ptr = tl.cast(B.data_ptr(), tl.pointer_type(B.dtype))
-
-def copy_kernel(a_ptr, b_ptr, A: TensorDescriptor, B: TensorDescriptor): 
+# a_ptr = tl.cast(A.base.data_ptr(), tl.pointer_type(A.dtype))
+# b_ptr = tl.cast(B.base.data_ptr(), tl.pointer_type(B.dtype))
+#
+# Note: would be nice to have A and B support taking a_ptr and b_ptr.
+@gluon.jit #(do_not_specialize=["A", "B"]): no effect atm
+def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     gl.static_assert(len(A.shape) == 2, f"A must be rank 2 but got {len(A.shape)} in {A}") # type: ignore
     gl.static_assert(len(B.shape) == 2, f"B must be rank 2 but got {len(B.shape)} in {B}") # type: ignore
 
@@ -132,7 +124,7 @@ def copy_kernel(a_ptr, b_ptr, A: TensorDescriptor, B: TensorDescriptor):
     gl.store(b_ptr + b_offsets_nd, b, mask=mask)
 
 
-def compile_with_ast_source(a_desc, b_desc, warp_size=64, num_warps=1):
+def compile_with_ast_source(A: torch.Tensor, B: torch.Tensor, a_desc: TensorDescriptor, b_desc: TensorDescriptor, warp_size=64, num_warps=1):
     src = GluonASTSource(
         fn=copy_kernel,
         signature={
@@ -151,33 +143,37 @@ def compile_with_ast_source(a_desc, b_desc, warp_size=64, num_warps=1):
     backend = triton.compiler.make_backend(target)
     options = backend.parse_options({"warp_size": warp_size, "num_warps": num_warps})
     output = triton.compile(src, target=target, options=options.__dict__)
-    print(output.asm["amdgcn"])
+    # print(output.asm["amdgcn"])
 
 
-def compile_with_parser(a_desc, b_desc, warp_size=64, num_warps=1):
+def compile_with_parser(A: torch.Tensor, B: torch.Tensor, a_desc: TensorDescriptor, b_desc: TensorDescriptor, warp_size=64, num_warps=1):
+    # target=GPUTarget("cuda", 100, 32),
+    target=GPUTarget("hip", 'gfx942', 64)
     # Run the parser
     from triton._filecheck import run_parser
     mod = run_parser(
         copy_kernel,
-        # Under regular parser flow, the ASTSource is created from a signature that is
-        # inferred from the JIT arguments via `create_function_from_signature`.
-        # This procedure infers the types with rules whose limitations are not immediately
-        # obvious (see `create_specialize_impl` and KernelParam specialization rules).
-        # compile_with_parser()
-        args=(a_desc.base, b_desc.base, a_desc, b_desc),
+        args=(A, B, a_desc, b_desc),
         kwargs={"warp_size": warp_size, "num_warps": num_warps},
-        target=GPUTarget("hip", 'gfx942', 64),
-        # target=GPUTarget("cuda", 100, 32),
+        target=target,
     )
-    # print(mod.str_nodebug())
+    # Compile the module from file path.
+    with tempfile.NamedTemporaryFile(suffix=".ttir", mode="w", delete=False) as f:
+        f.write(mod.str_nodebug())
+        f.flush()
+        ttir_path = f.name
+        print(f"ttir_path: {ttir_path}")
+        # Note: for this to work, I had to hack disable `if ir_source:` in `compiler.py`
+        compiled = triton.compile(ttir_path, target=target, options={"warp_size": warp_size, "num_warps": num_warps})
+        # print(compiled.asm["amdgcn"])
 
 
-def run(a_desc, b_desc, grid: tuple, warp_size=64, num_warps=1):
-    import math
-    a_desc.base.to("cuda")
-    b_desc.base.to("cuda")
-    copy_kernel[grid](a_desc.base, b_desc.base, a_desc, b_desc, warp_size=warp_size, num_warps=num_warps)
-    assert (a_desc.base == b_desc.base).all()
+def run(A, B, a_desc, b_desc, grid: tuple, warp_size=64, num_warps=1):
+    A.to("cuda")
+    B.to("cuda")
+    copy_kernel[grid](A, B, a_desc, b_desc, warp_size=warp_size, num_warps=num_warps)
+    assert (A == B).all()
+
 
 def test():
     num_warps = 4
@@ -202,10 +198,9 @@ def test():
         B, [BLOCK_M, BLOCK_N], blocked_b, shared_layout)
 
     # Run 2 emitter and 1 execution test.
-    compile_with_ast_source(a_desc, b_desc, num_warps=num_warps)
-    # compile_with_parser(a_desc, b_desc, num_warps=num_warps)
+    compile_with_ast_source(A, B, a_desc, b_desc, num_warps=num_warps)
+    compile_with_parser(A, B, a_desc, b_desc, num_warps=num_warps)
     # grid = tuple((math.ceil(M / BLOCK_M), math.ceil(N / BLOCK_N)))
-    # run(a_desc, b_desc, grid, num_warps=num_warps)
-
+    # run(A, B, a_desc, b_desc, grid, num_warps=num_warps)
 
 test()
