@@ -116,9 +116,7 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     gl.static_assert(len(A.shape) == 2, f"A must be rank 2 but got {len(A.shape)} in {A}") # type: ignore
     gl.static_assert(len(B.shape) == 2, f"B must be rank 2 but got {len(B.shape)} in {B}") # type: ignore
 
-    M : gl.constexpr = A.shape[0] # type: ignore
-    N : gl.constexpr = A.shape[1] # type: ignore
-        
+    # This part is still not variadic.
     m, n = gl.program_id(0), gl.program_id(1)
     starts = tuple_mul((m, n), A.block_shape) # type: ignore
     
@@ -133,10 +131,7 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     b_offsets_shift_1d = tuple_reduce_add(tuple_mul(starts, B.strides)) # type: ignore
     b_offsets_nd = b_offsets_nd + b_offsets_shift_1d
 
-    start_m, start_n = starts[0], starts[1]
-    mask = ((gl.arange(0, A.block_shape[0])[:, None] < M - start_m)) | \
-           ((gl.arange(0, A.block_shape[1])[None, :] < N - start_n))
-    mask = gl.set_auto_layout(mask, A.global_layout)
+    mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout) # type: ignore
 
     a = gl.load(a_ptr + a_offsets_nd, mask=mask)
     via_explicit_shared_memory: gl.constexpr = False

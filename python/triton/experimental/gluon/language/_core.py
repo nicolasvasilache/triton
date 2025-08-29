@@ -508,3 +508,28 @@ def arange_nd(starts, ends, strides, layout, _semantic=None):
     strides = [_unwrap_if_constexpr(stride) for stride in strides]
     layout = _unwrap_if_constexpr(layout)
     return _semantic.arange_nd(starts, ends, strides, layout)
+
+
+@builtin
+def mask_nd(starts, ends, block_shape, layout, _semantic=None):
+    """
+    Generate an n-dimensional mask tensor for boundary checking.
+    
+    Creates a mask where each element is True if the corresponding index
+    (start + arange_value) is within bounds for all dimensions.
+
+    Args:
+        starts (List[int]): Starting indices for each dimension.
+        ends (List[int]): Upper bounds for each dimension (exclusive).
+        block_shape (List[int]): Shape of the block/tensor.
+        layout (DistributedLayout): The layout of the output tensor.
+
+    Returns:
+        tensor: An nD boolean tensor where True indicates valid indices.
+    """
+    assert len(starts) == len(ends) == len(block_shape), "starts, ends, and block_shape must have the same length"
+    starts = [_unwrap_if_constexpr(start) for start in starts]
+    ends = [_unwrap_if_constexpr(end) for end in ends]
+    block_shape = [_unwrap_if_constexpr(shape) for shape in block_shape]
+    layout = _unwrap_if_constexpr(layout)
+    return _semantic.mask_nd(starts, ends, block_shape, layout)

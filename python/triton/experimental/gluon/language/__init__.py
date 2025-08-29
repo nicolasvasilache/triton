@@ -75,6 +75,7 @@ from ._core import (
     # Sugaring
     #################################################################################
     arange_nd,
+    mask_nd,
 )
 from ._layouts import (
     AutoLayout,

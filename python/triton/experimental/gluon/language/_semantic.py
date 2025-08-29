@@ -436,12 +436,62 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         rank = len(starts)
         res = None
         for index, (start, end, stride) in enumerate(zip(starts, ends, strides)):
-            l = layout
-            for i in range(rank):
-                l = SliceLayout(dim=i, parent=l) if i != index else l
+            l = AutoLayout()
+            if layout is not None:
+                l = layout
+                for i in range(rank):
+                    l = SliceLayout(dim=i, parent=l) if i != index else l
             rg = self.arange(start, end, l)
             for i in reversed(range(rank)):
                 rg = self.expand_dims(rg, i) if i != index else rg
             mul = self.mul(rg, stride, sanitize_overflow=True)
             res = self.add(res, mul, sanitize_overflow=True) if res is not None else mul
         return res
+
+    def mask_nd(self, starts, ends, mask_shape, layout=None):
+        """
+        Generate an n-dimensional mask tensor for boundary checking.
+        
+        Creates a mask where each element is True if the corresponding index
+        (start + arange_value) is within bounds for all dimensions.
+
+        Args:
+            starts (List[int]): Starting indices for each dimension.
+            ends (List[int]): Upper bounds for each dimension (exclusive).
+            mask_shape (List[int]): Shape of the mask.
+            layout (DistributedLayout): The layout of the output tensor. Defaults to AutoLayout.
+
+        Returns:
+            tensor: An nD boolean tensor where True indicates valid indices.
+            
+        Example usage:
+        ```
+            # 2-D mask without mask_nd (current approach)
+            start_m, start_n = starts[0], starts[1]
+            mask = ((gl.arange(0, A.block_shape[0])[:, None] < M - start_m)) & \
+                   ((gl.arange(0, A.block_shape[1])[None, :] < N - start_n))
+            
+            # 2-D mask with mask_nd (new approach)
+            mask = gl.mask_nd([start_m, start_n], [M, N], A.block_shape, A.global_layout)
+        ```
+        """
+        rank = len(starts)
+        assert rank == len(ends) == len(mask_shape), \
+            "starts, ends, and mask_shape must have the same length got " + \
+                f"{starts}, {ends}, {mask_shape}"
+
+        mask = None
+        for index, (start, end, shape) in enumerate(zip(starts, ends, mask_shape)):
+            # Create layout for this dimension
+            l = AutoLayout()
+            if layout is not None:
+                l = layout
+                for i in range(rank):
+                    l = SliceLayout(dim=i, parent=l) if i != index else l
+            rg = self.arange(0, shape, l)
+            for i in reversed(range(rank)):
+                rg = self.expand_dims(rg, i) if i != index else rg
+            offset_rg = self.add(rg, start, sanitize_overflow=True)
+            dim_mask = self.less_than(offset_rg, end)
+            mask = self.logical_and(mask, dim_mask) if mask is not None else dim_mask
+        return mask
