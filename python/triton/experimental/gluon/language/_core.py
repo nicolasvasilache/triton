@@ -511,7 +511,7 @@ def arange_nd(starts, ends, strides, layout, _semantic=None):
 
 
 @builtin
-def mask_nd(starts, ends, block_shape, layout, _semantic=None):
+def mask_nd(starts, ends, mask_shape, layout, _semantic=None):
     """
     Generate an n-dimensional mask tensor for boundary checking.
     
@@ -521,15 +521,15 @@ def mask_nd(starts, ends, block_shape, layout, _semantic=None):
     Args:
         starts (List[int]): Starting indices for each dimension.
         ends (List[int]): Upper bounds for each dimension (exclusive).
-        block_shape (List[int]): Shape of the block/tensor.
+        mask_shape (List[int]): Shape of the mask.
         layout (DistributedLayout): The layout of the output tensor.
 
     Returns:
         tensor: An nD boolean tensor where True indicates valid indices.
     """
-    assert len(starts) == len(ends) == len(block_shape), "starts, ends, and block_shape must have the same length"
+    assert len(starts) == len(ends) == len(mask_shape), "starts, ends, and mask_shape must have the same length"
     starts = [_unwrap_if_constexpr(start) for start in starts]
     ends = [_unwrap_if_constexpr(end) for end in ends]
-    block_shape = [_unwrap_if_constexpr(shape) for shape in block_shape]
+    mask_shape = [_unwrap_if_constexpr(shape) for shape in mask_shape]
     layout = _unwrap_if_constexpr(layout)
-    return _semantic.mask_nd(starts, ends, block_shape, layout)
+    return _semantic.mask_nd(starts, ends, mask_shape, layout)

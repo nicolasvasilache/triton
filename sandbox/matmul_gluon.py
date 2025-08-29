@@ -95,8 +95,21 @@ def tuple_reduce_add(t: tl.tuple):
     return res
 
 @gluon.jit
-def arange_nd_from_blocked_descriptor(blocked_desc: TensorDescriptor):
-    return gl.arange_nd((0, ) * len(blocked_desc.shape), blocked_desc.block_shape, blocked_desc.strides, layout=blocked_desc.global_layout) # type: ignore
+def arange_nd_from_blocked_descriptor(starts: tl.tuple, 
+                                      blocked_desc: TensorDescriptor):
+    # We cannot shift start and end by dynamic quantities: the type will not
+    # be statically known. Even if the type was statically known, the start
+    # and end would be dynamic SSA values but tt.make_range only takes
+    # attributes. So we have to use constants for the start and end and shift
+    # by an offset separately.
+    base_offsets_nd = gl.arange_nd(
+        (0, ) * len(blocked_desc.shape), # type: ignore
+        blocked_desc.block_shape, # type: ignore
+        blocked_desc.strides, # type: ignore
+        layout=blocked_desc.global_layout) # type: ignore
+    shift_1d = tuple_reduce_add(
+        tuple_mul(starts, blocked_desc.strides)) # type: ignore
+    return base_offsets_nd + shift_1d
 
 # To accept a non-static pointer, we have to pass a_ptr as a non-constexpr.
 # Our custom TensorDescriptor object is not supported and is unlikely to every be.
@@ -120,20 +133,15 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     m, n = gl.program_id(0), gl.program_id(1)
     starts = tuple_mul((m, n), A.block_shape) # type: ignore
     
-    # We cannot shift start and end by dynamic quantities: the type will not be statically known.
-    # Even if the type was statically known, the start and end would be dynamic SSA values but tt.make_range only takes attributes.
-    # So we have to use constants for the start and end and shift by an offset separately.
-    a_offsets_nd = arange_nd_from_blocked_descriptor(A)
-    a_offsets_shift_1d = tuple_reduce_add(tuple_mul(starts, A.strides)) # type: ignore
-    a_offsets_nd = a_offsets_nd + a_offsets_shift_1d
-        
-    b_offsets_nd = arange_nd_from_blocked_descriptor(B)
-    b_offsets_shift_1d = tuple_reduce_add(tuple_mul(starts, B.strides)) # type: ignore
-    b_offsets_nd = b_offsets_nd + b_offsets_shift_1d
+    a_offsets_nd = arange_nd_from_blocked_descriptor(starts, A)
 
     mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout) # type: ignore
 
     a = gl.load(a_ptr + a_offsets_nd, mask=mask)
+    
+    b_offsets_nd = arange_nd_from_blocked_descriptor(starts, B)
+    mask = gl.convert_layout(mask, B.global_layout, assert_trivial=False) # type: ignore
+    
     via_explicit_shared_memory: gl.constexpr = False
     if via_explicit_shared_memory:
         smem = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout) # type: ignore
@@ -141,7 +149,7 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
         b = smem.load(B.global_layout) # type: ignore
     else:
         b = gl.convert_layout(a, B.global_layout, assert_trivial=False) # type: ignore
-        mask = gl.convert_layout(mask, B.global_layout, assert_trivial=False) # type: ignore
+    
     gl.store(b_ptr + b_offsets_nd, b, mask=mask)
 
 
