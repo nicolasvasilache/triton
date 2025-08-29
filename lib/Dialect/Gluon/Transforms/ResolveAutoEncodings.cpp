@@ -2,12 +2,15 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Support/WalkResult.h"
 #include "triton/Dialect/Gluon/IR/Dialect.h"
 #include "triton/Dialect/Gluon/Transforms/Passes.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PriorityWorklist.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
@@ -74,9 +77,9 @@ LayoutInfo combineInfo(LayoutInfo lhs, LayoutInfo rhs, Operation *op,
   if (compare(lhs.encoding, rhs.encoding, hashMemo)) {
     std::swap(lhs, rhs);
   }
-  if (lhs.mayVary)
+  if (lhs.mayVary || isa<gluon::AutoEncodingAttr>(lhs.encoding))
     return rhs;
-  if (rhs.mayVary)
+  if (rhs.mayVary || isa<gluon::AutoEncodingAttr>(rhs.encoding))
     return lhs;
   if (lhs.encoding == rhs.encoding)
     return lhs;
@@ -116,25 +119,38 @@ LogicalResult inferAutoLayouts(FuncOp func) {
         auto defOp = value.getDefiningOp();
         auto op = defOp ? defOp : func;
         auto combine = combineInfo(it->second, info, op, hashMemo);
-        if (!combine)
+        if (!combine) {
+          LLVM_DEBUG({
+            DBGS() << "could not combine:\n\t" << it->second << "\tand\t" << info << "\n";
+          });
           return failure();
+        }
         if (combine == it->second)
           continue;
         it->second = combine;
       }
       LLVM_DEBUG({
         DBGS() << "Setting value:\n\t" << value << "\nto encoding:\n\t"
-               << it->second << "\n";
+               << it->second.encoding << "\n";
       });
       worklist.insert(value);
     }
     return success();
   };
 
-  // 1. Set seed values from set_auto_layout ops
+  // 1. Set seed values from set_auto_layout ops and MakeRangeOp with auto encodings.
   auto res = func.walk([&](gluon::SetAutoLayoutOp op) -> WalkResult {
+    LLVM_DEBUG({
+      DBGS() << "update from seed: " << op << "\n";
+    });
     return updateEncoding({op.getSrc()},
                           LayoutInfo{op.getType().getEncoding()});
+  });
+  func.walk([&](triton::MakeRangeOp op) {
+    auto encoding = llvm::dyn_cast_or_null<gluon::AutoEncodingAttr>(op.getResult().getType().getEncoding());
+    if (!encoding)
+      return;
+    worklist.insert(op);
   });
 
   if (res.wasInterrupted())
@@ -143,11 +159,16 @@ LogicalResult inferAutoLayouts(FuncOp func) {
   // 2. Propagate encodings through the graph until fixed point, or conflict
   while (!worklist.empty()) {
     auto val = worklist.pop_back_val();
-    auto info = valueToEncoding[val];
+    auto it = valueToEncoding.find(val);
+    LayoutInfo info = (it != valueToEncoding.end()) ? 
+      it->second : LayoutInfo{gluon::AutoEncodingAttr::get(val.getContext())};
     assert(info);
 
     // Propagate to users
     for (OpOperand &use : val.getUses()) {
+      LLVM_DEBUG({
+        DBGS() << "propagate to use: " << use.get() << "\n";
+      });
       auto op = use.getOwner();
       if (isa<scf::ForOp, scf::WhileOp>(op)) {
         auto offset = 3 * isa<scf::ForOp>(op);
@@ -163,6 +184,9 @@ LogicalResult inferAutoLayouts(FuncOp func) {
         if (dstEnc) {
           bool mayVary = info.mayVary || encodingsMayVary(op);
           LayoutInfo dstInfo{dstEnc, mayVary};
+          LLVM_DEBUG({
+            DBGS() << "Setting value(s):\n\t" << *op << "\nto encoding:\n\t" << dstEnc << "\n";
+          });
           if (failed(updateEncoding(llvm::to_vector_of<Value>(op->getResults()),
                                     dstInfo)))
             return failure();
@@ -173,6 +197,9 @@ LogicalResult inferAutoLayouts(FuncOp func) {
     // Propagate to defining ops
     if (auto opResult = dyn_cast<OpResult>(val)) {
       auto definingOp = opResult.getOwner();
+      LLVM_DEBUG({
+        DBGS() << "propagate to definingOp: " << *definingOp << "\n";
+      });
       if (isa<scf::ForOp, scf::WhileOp, scf::IfOp>(definingOp)) {
         auto tiedArgs = getTiedArgs(definingOp, opResult.getResultNumber());
         if (failed(updateEncoding(tiedArgs, info)))
@@ -258,6 +285,7 @@ public:
     if (failed(inferAutoLayouts(m)))
       return signalPassFailure();
 
+    m->dump();
     // Double check we didn't miss anything
     auto res = m.walk([](Operation *op) -> WalkResult {
       for (auto resTy : op->getResultTypes()) {

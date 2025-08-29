@@ -7,7 +7,7 @@ import torch
 
 import triton
 import triton.language as tl
-from triton.language.core import _aggregate as aggregate
+from triton.language.core import _aggregate as aggregate, static_print
 import triton.experimental.gluon as gluon
 
 from triton._utils import validate_block_shape, canonicalize_dtype, get_primitive_bitwidth
@@ -112,16 +112,28 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     b_offsets_shift_1d = (start_m * B.strides[0] + start_n * B.strides[1]) # type: ignore
     b_offsets_nd = b_offsets_nd + b_offsets_shift_1d
 
-    mask = None
-    a = gl.load(a_ptr + a_offsets_nd, mask=mask)
-    via_explicit_shared_memory: gl.constexpr = False
-    if via_explicit_shared_memory:
-        smem = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout) # type: ignore
-        smem.store(a)
-        b = smem.load(B.global_layout) # type: ignore
-    else:
-        b = gl.convert_layout(a, B.global_layout, assert_trivial=False) # type: ignore
-    gl.store(b_ptr + b_offsets_nd, b, mask=mask)
+    mask_1 = gl.arange(0, A.block_shape[0])[:, None] < M - start_m
+    mask_2 = gl.arange(0, A.block_shape[1])[None, :] < N - start_n
+    mask_a = mask_1 | mask_2
+    mask_a = gl.set_auto_layout(mask_a, A.global_layout)
+
+    # mask = ((gl.arange(0, A.block_shape[0])[:, None] < M - start_m)) | \
+    #        ((gl.arange(0, A.block_shape[1])[None, :] < N - start_n))
+    
+    # mask_a = gl.convert_layout(mask_a, A.global_layout, assert_trivial=False)
+    
+    a = gl.load(a_ptr + a_offsets_nd, mask=mask_a)
+    # via_explicit_shared_memory: gl.constexpr = False
+    # if via_explicit_shared_memory:
+    #     smem = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout) # type: ignore
+    #     smem.store(a)
+    #     b = smem.load(B.global_layout) # type: ignore
+    # else:
+    b = gl.convert_layout(a, B.global_layout, assert_trivial=False) # type: ignore
+    
+    # mask_b = mask1 | mask2
+    # mask_b = gl.set_auto_layout(mask_b, B.global_layout)
+    gl.store(b_ptr + b_offsets_nd, b)#, mask=mask_b)
 
 
 def compile_with_ast_source(A: torch.Tensor, B: torch.Tensor, a_desc: TensorDescriptor, b_desc: TensorDescriptor, warp_size=64, num_warps=1):
@@ -195,7 +207,7 @@ def test():
     a_desc = TensorDescriptor.from_tensor(
         A, [BLOCK_M, BLOCK_N], blocked_a, shared_layout)
     b_desc = TensorDescriptor.from_tensor(
-        B, [BLOCK_M, BLOCK_N], blocked_b, shared_layout)
+        B, [BLOCK_M, BLOCK_N], blocked_a, shared_layout)
 
     # Run 2 emitter and 1 execution test.
     compile_with_ast_source(A, B, a_desc, b_desc, num_warps=num_warps)
