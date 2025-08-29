@@ -1,194 +1,21 @@
-from dataclasses import dataclass
 import math
 import tempfile
-from typing import List, Any
 
 import torch
 
 import triton
 import triton.language as tl
-from triton.language.core import _aggregate as aggregate, static_print
+from triton.language.core import static_print
 import triton.experimental.gluon as gluon
 
-from triton._utils import validate_block_shape, canonicalize_dtype, get_primitive_bitwidth
+from triton._utils import canonicalize_dtype, get_primitive_bitwidth
 from triton.backends.compiler import GPUTarget
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon._runtime import GluonASTSource
 
-# Convert PyTorch dtype to Triton dtype
-def torch_to_triton_dtype(torch_dtype):
-    if torch_dtype == torch.float32:
-        return tl.float32
-    elif torch_dtype == torch.float16:
-        return tl.float16
-    elif torch_dtype == torch.int32:
-        return tl.int32
-    elif torch_dtype == torch.int64:
-        return tl.int64
-    else:
-        raise ValueError(f"Unsupported dtype: {torch_dtype}")
-
-@aggregate
-@dataclass
-class TensorDescriptor:
-    dtype: tl.dtype
-    shape: tl.tuple
-    strides: tl.tuple
-    block_shape: tl.tuple
-    global_layout: gl.BlockedLayout
-    shared_layout: gl.SwizzledSharedLayout
-
-    def __post_init__(self):
-        rank = len(self.shape)
-        assert len(self.strides) == rank, f"rank mismatch: {self}"
-        assert len(self.block_shape) == rank, f"rank mismatch: {self}"
-        assert rank > 0, "rank must not be zero"
-        validate_block_shape(self.block_shape)
-        assert isinstance(self.global_layout, gl.BlockedLayout), "Layout must be gl.BlockedLayout"
-        assert isinstance(self.shared_layout, gl.SwizzledSharedLayout), "Layout must be gl.SwizzledSharedLayout"
-
-    @staticmethod
-    def from_tensor(tensor: Any,
-                    block_shape: tuple[int],
-                    global_layout: gl.BlockedLayout,
-                    shared_layout: gl.SwizzledSharedLayout):
-        return TensorDescriptor(
-            torch_to_triton_dtype(tensor.dtype),
-            tl.tuple(tensor.shape),
-            tl.tuple(tensor.stride()),
-            tl.tuple(block_shape),
-            global_layout,
-            shared_layout,
-        )
-
-    def __hash__(self):
-        return hash((
-            self.dtype,
-            tl.tuple(self.shape),
-            tl.tuple(self.strides),
-            tl.tuple(self.block_shape),
-            self.global_layout,
-            self.shared_layout,
-        ))
-
-@gluon.jit
-def compute_strides(basis: tl.tuple):
-    """
-    Compute strides from basis dimensions.
-    
-    Args:
-        basis: Tuple of basis dimensions (e.g., (b0, b1, b2, b3))
-    
-    Returns:
-        Tuple of strides where each stride is the product of all subsequent basis dimensions.
-        For basis (b0, b1, b2, b3), returns (b1*b2*b3, b2*b3, b3, 1)
-    """
-    strides = tl.tuple([1] * len(basis))
-    for i in tl.static_range(len(basis) - 2, -1, -1):  # len-2 down to 0
-        stride_val = strides[i + 1] * basis[i + 1]
-        strides._setitem(i, stride_val)
-    return strides
-
-@gluon.jit
-def linearize(indices: tl.tuple, basis: tl.tuple):
-    """
-    Convert multi-dimensional indices to a linear index using the given basis.
-    
-    Args:
-        indices: Tuple of indices (e.g., (i, j, k, l))
-        basis: Tuple of basis dimensions (e.g., (b0, b1, b2, b3))
-    
-    Returns:
-        Linear index computed using strides: i*stride0 + j*stride1 + k*stride2 + l*stride3
-        where strides = (b1*b2*b3, b2*b3, b3, 1)
-    """
-    gl.static_assert(len(indices) == len(basis), 
-                     f"indices and basis must have same length: {len(indices)} vs {len(basis)}")
-    
-    strides = compute_strides(basis)
-    
-    linear_idx = 0
-    for i in tl.static_range(len(indices)):
-        linear_idx += indices[i] * strides[i]
-    return linear_idx
-
-@gluon.jit
-def delinearize(linear_idx, basis: tl.tuple):
-    """
-    Convert a linear index back to multi-dimensional indices using the given basis.
-    
-    Args:
-        linear_idx: Linear index to convert
-        basis: Tuple of basis dimensions (e.g., (b0, b1, b2, b3))
-    
-    Returns:
-        Tuple of indices (i, j, k, l, ...)
-    """
-    strides = compute_strides(basis)
-    
-    result = tl.tuple([0] * len(basis))
-    remaining = linear_idx
-    for i in tl.static_range(len(basis)):
-        idx_val = remaining // strides[i]
-        result._setitem(i, idx_val)
-        remaining = remaining % strides[i]
-    
-    return result
-
-
-@gluon.jit
-def get_linear_program_id():
-    """Get linear program ID using the generic linearize function."""
-    pid0 = gl.program_id(0)
-    pid1 = gl.program_id(1) 
-    pid2 = gl.program_id(2)
-    npg0 = gl.num_programs(0)
-    npg1 = gl.num_programs(1)
-    npg2 = gl.num_programs(2)
-    return linearize(tl.tuple([pid0, pid1, pid2]), tl.tuple([npg0, npg1, npg2]))
-
-
-@gluon.jit
-def tuple_mul(ta: tl.tuple, tb: tl.tuple):
-    gl.static_assert(len(ta) == len(tb), f"tuple_mul: {ta} and {tb} must have the same length")
-    # tuple is a very special flower:
-    #   - this fails because only tuple comprehension is supported.
-    #       return tl.tuple([ta[i] * tb[i] for i in range(len(ta))])
-    #   - this fails because GeneratorExp is not supported.
-    #       return tl.tuple(ta[i] * tb[i] for i in range(len(ta)))
-    #   - can't use zip because it's unsupported.
-    #   - can't use list + append because it's unsupported.
-    # So I have to resort to _setitem which is marked with TODO: remove.
-    result = tl.tuple(ta)
-    for i in tl.static_range(len(ta)):
-        result._setitem(i, ta[i] * tb[i])
-    return result
-
-
-@gluon.jit
-def tuple_reduce_add(t: tl.tuple):
-    res = t[0]
-    for i in tl.static_range(1, len(t)):
-        res += t[i]
-    return res
-
-
-@gluon.jit
-def arange_nd_from_blocked_descriptor(starts: tl.tuple, 
-                                      blocked_desc: TensorDescriptor):
-    # We cannot shift start and end by dynamic quantities: the type will not
-    # be statically known. Even if the type was statically known, the start
-    # and end would be dynamic SSA values but tt.make_range only takes
-    # attributes. So we have to use constants for the start and end and shift
-    # by an offset separately.
-    base_offsets_nd = gl.arange_nd(
-        (0, ) * len(blocked_desc.shape), # type: ignore
-        blocked_desc.block_shape, # type: ignore
-        blocked_desc.strides, # type: ignore
-        layout=blocked_desc.global_layout) # type: ignore
-    shift_1d = tuple_reduce_add(
-        tuple_mul(starts, blocked_desc.strides)) # type: ignore
-    return base_offsets_nd + shift_1d
+from tuple_helpers import delinearize, get_linear_program_id
+from descriptor_helpers import TensorDescriptor
+from nd_helpers import nd_offset_from_blocked_descriptor
 
 
 # To accept a non-static pointer, we have to pass a_ptr as a non-constexpr.
@@ -211,12 +38,12 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     linear_program_id = get_linear_program_id()
     starts = delinearize(linear_program_id, A.block_shape) # type: ignore
     
-    a_offsets_nd = arange_nd_from_blocked_descriptor(starts, A)
+    a_offsets_nd = nd_offset_from_blocked_descriptor(starts, A)
     mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout) # type: ignore
 
     a = gl.load(a_ptr + a_offsets_nd, mask=mask)
     
-    b_offsets_nd = arange_nd_from_blocked_descriptor(starts, B)
+    b_offsets_nd = nd_offset_from_blocked_descriptor(starts, B)
     mask = gl.convert_layout(mask, B.global_layout, assert_trivial=False) # type: ignore
     
     via_explicit_shared_memory: gl.constexpr = False
@@ -305,7 +132,7 @@ def test():
 
     # Run 2 emitter and 1 execution test.
     compile_with_ast_source(A, B, a_desc, b_desc, num_warps=num_warps)
-    # compile_with_parser(A, B, a_desc, b_desc, num_warps=num_warps)
+    compile_with_parser(A, B, a_desc, b_desc, num_warps=num_warps)
     # grid = tuple((math.ceil(M / BLOCK_M), math.ceil(N / BLOCK_N)))
     # run(A, B, a_desc, b_desc, grid, num_warps=num_warps)
 
