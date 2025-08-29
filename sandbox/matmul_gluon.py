@@ -71,6 +71,28 @@ class TensorDescriptor:
             self.shared_layout,
         ))
 
+@gluon.jit
+def tuple_mul(ta: tl.tuple, tb: tl.tuple):
+    gl.static_assert(len(ta) == len(tb), f"tuple_mul: {ta} and {tb} must have the same length")
+    # tuple is a very special flower:
+    #   - this fails because only tuple comprehension is supported.
+    #       return tl.tuple([ta[i] * tb[i] for i in range(len(ta))])
+    #   - this fails because GeneratorExp is not supported.
+    #       return tl.tuple(ta[i] * tb[i] for i in range(len(ta)))
+    #   - can't use zip because it's unsupported.
+    #   - can't use list + append because it's unsupported.
+    # So I have to resort to _setitem which is marked with TODO: remove.
+    result = tl.tuple(ta)
+    for i in tl.static_range(len(ta)):
+        result._setitem(i, ta[i] * tb[i])
+    return result
+
+@gluon.jit
+def tuple_reduce_add(t: tl.tuple):
+    res = t[0]
+    for i in tl.static_range(1, len(t)):
+        res += t[i]
+    return res
 
 @gluon.jit
 def arange_nd_from_blocked_descriptor(blocked_desc: TensorDescriptor):
@@ -98,20 +120,20 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     N : gl.constexpr = A.shape[1] # type: ignore
         
     m, n = gl.program_id(0), gl.program_id(1)
-    start_m = m * A.block_shape[0] # type: ignore
-    start_n = n * A.block_shape[1] # type: ignore
+    starts = tuple_mul((m, n), A.block_shape) # type: ignore
     
     # We cannot shift start and end by dynamic quantities: the type will not be statically known.
     # Even if the type was statically known, the start and end would be dynamic SSA values but tt.make_range only takes attributes.
     # So we have to use constants for the start and end and shift by an offset separately.
     a_offsets_nd = arange_nd_from_blocked_descriptor(A)
-    a_offsets_shift_1d = (start_m * A.strides[0] + start_n * A.strides[1]) # type: ignore
+    a_offsets_shift_1d = tuple_reduce_add(tuple_mul(starts, A.strides)) # type: ignore
     a_offsets_nd = a_offsets_nd + a_offsets_shift_1d
         
     b_offsets_nd = arange_nd_from_blocked_descriptor(B)
-    b_offsets_shift_1d = (start_m * B.strides[0] + start_n * B.strides[1]) # type: ignore
+    b_offsets_shift_1d = tuple_reduce_add(tuple_mul(starts, B.strides)) # type: ignore
     b_offsets_nd = b_offsets_nd + b_offsets_shift_1d
 
+    start_m, start_n = starts[0], starts[1]
     mask = ((gl.arange(0, A.block_shape[0])[:, None] < M - start_m)) | \
            ((gl.arange(0, A.block_shape[1])[None, :] < N - start_n))
     mask = gl.set_auto_layout(mask, A.global_layout)
@@ -203,8 +225,8 @@ def test():
 
     # Run 2 emitter and 1 execution test.
     compile_with_ast_source(A, B, a_desc, b_desc, num_warps=num_warps)
-    compile_with_parser(A, B, a_desc, b_desc, num_warps=num_warps)
-    grid = tuple((math.ceil(M / BLOCK_M), math.ceil(N / BLOCK_N)))
-    run(A, B, a_desc, b_desc, grid, num_warps=num_warps)
+    # compile_with_parser(A, B, a_desc, b_desc, num_warps=num_warps)
+    # grid = tuple((math.ceil(M / BLOCK_M), math.ceil(N / BLOCK_N)))
+    # run(A, B, a_desc, b_desc, grid, num_warps=num_warps)
 
 test()

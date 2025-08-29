@@ -52,7 +52,7 @@ def _is_triton_tensor(o: Any) -> bool:
 
 
 def _is_constexpr(o: Any) -> bool:
-    return o is None or isinstance(o, (constexpr, language.core.dtype, JITCallable))
+    return o is None or isinstance(o, (constexpr, language.core.dtype, JITCallable)) or isinstance(o, (bool, int, float))
 
 
 def _is_non_scalar_tensor(o: Any) -> bool:
