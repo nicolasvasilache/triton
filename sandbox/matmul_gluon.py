@@ -110,25 +110,25 @@ def run(A, B, a_desc, b_desc, grid: tuple, warp_size=64, num_warps=1):
 
 def test():
     num_warps = 4
-    M, N = 257, 1025
-    BLOCK_M, BLOCK_N = 16, 32
-    A = torch.randn(M, N, dtype=torch.float32)
+    sizes    = [257, 1025, 513]
+    block_sizes = [8, 16, 32]
+    A = torch.randn(sizes, dtype=torch.float32)
     B = torch.empty_like(A).zero_()
     blocked_a = gl.BlockedLayout(
-        size_per_thread=[1, 4],
-        threads_per_warp=[4, 16],
-        warps_per_cta=[1, num_warps],
-        order=[1, 0])
+        size_per_thread=[1, 1, 4],
+        threads_per_warp=[1, 4, 16],
+        warps_per_cta=[1, 1, num_warps],
+        order=[2, 1, 0])
     blocked_b = gl.BlockedLayout(
-        size_per_thread=[4, 1],
-        threads_per_warp=[16, 4],
-        warps_per_cta=[1, num_warps],
-        order=[1, 0])
-    shared_layout = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
+        size_per_thread=[1, 4, 1],
+        threads_per_warp=[1, 16, 4],
+        warps_per_cta=[1, 1, num_warps],
+        order=[2, 1, 0])
+    shared_layout = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[2, 1, 0])
     a_desc = TensorDescriptor.from_tensor(
-        A, [BLOCK_M, BLOCK_N], blocked_a, shared_layout)
+        A, block_sizes, blocked_a, shared_layout)
     b_desc = TensorDescriptor.from_tensor(
-        B, [BLOCK_M, BLOCK_N], blocked_a, shared_layout)
+        B, block_sizes, blocked_b, shared_layout)
 
     # Run 2 emitter and 1 execution test.
     compile_with_ast_source(A, B, a_desc, b_desc, num_warps=num_warps)

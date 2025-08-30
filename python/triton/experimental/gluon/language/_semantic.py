@@ -439,10 +439,10 @@ class GluonSemantic(TritonSemantic[TensorTy]):
             l = AutoLayout()
             if layout is not None:
                 l = layout
-                for i in range(rank):
+                for i in reversed(range(rank)):
                     l = SliceLayout(dim=i, parent=l) if i != index else l
             rg = self.arange(start, end, l)
-            for i in reversed(range(rank)):
+            for i in range(rank):
                 rg = self.expand_dims(rg, i) if i != index else rg
             mul = self.mul(rg, stride, sanitize_overflow=True)
             res = self.add(res, mul, sanitize_overflow=True) if res is not None else mul
@@ -486,10 +486,10 @@ class GluonSemantic(TritonSemantic[TensorTy]):
             l = AutoLayout()
             if layout is not None:
                 l = layout
-                for i in range(rank):
+                for i in reversed(range(rank)):
                     l = SliceLayout(dim=i, parent=l) if i != index else l
             rg = self.arange(0, shape, l)
-            for i in reversed(range(rank)):
+            for i in range(rank):
                 rg = self.expand_dims(rg, i) if i != index else rg
             offset_rg = self.add(rg, start, sanitize_overflow=True)
             dim_mask = self.less_than(offset_rg, end)
