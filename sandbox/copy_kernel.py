@@ -7,7 +7,7 @@ from nd_helpers import nd_offset_from_blocked_descriptor, nd_mask_from_blocked_d
 
 
 @gluon.jit
-def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
+def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr, via_explicit_shared_memory: gl.constexpr = False):
     gl.static_assert(len(A.shape) == len(B.shape), f"A and B must have same rank: {len(A.shape)} vs {len(B.shape)}")
 
     linear_program_id = get_linear_program_id()
@@ -19,8 +19,7 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
 
     a_offsets_nd = nd_offset_from_blocked_descriptor(start_blocks, A)
     a = gl.load(a_ptr + a_offsets_nd, mask=mask_nd_a, cache_modifier=".ca")
-    
-    via_explicit_shared_memory: gl.constexpr = False
+        
     if via_explicit_shared_memory:
         smem = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout)
         smem.store(a)
