@@ -52,7 +52,7 @@ def _is_triton_tensor(o: Any) -> bool:
 
 
 def _is_constexpr(o: Any) -> bool:
-    return o is None or isinstance(o, (constexpr, language.core.dtype, JITCallable)) or isinstance(o, (bool, int, float))
+    return o is None or isinstance(o, (constexpr, language.core.dtype, JITCallable))
 
 
 def _is_non_scalar_tensor(o: Any) -> bool:
@@ -537,10 +537,24 @@ class CodeGenerator(ast.NodeVisitor):
         if not isinstance(iter, tl_tuple):
             raise NotImplementedError("only tuple comprehensions are supported")
 
-        results = []
-        for item in iter:
-            self.set_value(comp.target.id, item)
-            results.append(self.visit(node.elt))
+        with enter_sub_region(self) as sr:
+            results = []
+            for item in iter:
+                failed = False
+                if isinstance(comp.target, ast.Name):
+                    self.set_value(comp.target.id, item)
+                elif isinstance(comp.target, ast.Tuple):
+                    for i, target in enumerate(comp.target.elts):
+                        if isinstance(target, ast.Name):
+                            self.set_value(target.id, item.values[i])
+                        else:
+                            failed = True
+                            break
+                else:
+                    failed = True
+                if failed:
+                    raise NotImplementedError("only tuple comprehensions over ast.Name or Tuple[ast.Name] supported")
+                results.append(self.visit(node.elt))
         return tl_tuple(results)
 
     # By design, only non-kernel functions can return
