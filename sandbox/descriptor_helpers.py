@@ -13,55 +13,55 @@ Functions:
 """
 
 from dataclasses import dataclass
-from typing import Any
+import math
+from typing import Any, List
 
 import torch
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
-from triton._utils import validate_block_shape
 import triton.experimental.gluon.language as gl
+from triton._utils import is_power_of_two
 
 
-def torch_to_triton_dtype(torch_dtype: torch.dtype) -> tl.dtype:
+def torch_to_triton_dtype(dtype: torch.dtype) -> tl.dtype:
     """
     Convert a PyTorch dtype to the corresponding Triton dtype.
-    
-    Args:
-        torch_dtype: The PyTorch dtype to convert
-        
-    Returns:
-        The corresponding Triton dtype
-        
-    Raises:
-        ValueError: If the PyTorch dtype is not supported
-        
-    Examples:
-        >>> torch_to_triton_dtype(torch.float32)
-        tl.float32
-        >>> torch_to_triton_dtype(torch.int64)
-        tl.int64
     """
-    if torch_dtype == torch.float32:
-        return tl.float32
-    elif torch_dtype == torch.float16:
-        return tl.float16
-    elif torch_dtype == torch.int32:
-        return tl.int32
-    elif torch_dtype == torch.int64:
-        return tl.int64
-    else:
-        raise ValueError(f"Unsupported dtype: {torch_dtype}")
+    dtype_map = {
+        torch.float32: tl.float32,
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+        torch.float64: tl.float64,
+        torch.int32: tl.int32,
+        torch.int64: tl.int64,
+        torch.int16: tl.int16,
+        torch.int8: tl.int8,
+        torch.uint8: tl.uint8,
+        torch.bool: tl.int1,
+    }
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    return dtype_map[dtype]
 
+TRITON_MAX_TENSOR_NUMEL = 2 ** 31
+def validate_shape(shape: List[tl.constexpr], is_block_shape: bool = False):
+    numel = 1
+    for i, d in enumerate(shape):
+        if not isinstance(d, tl.constexpr) or not isinstance(d.value, int):
+            raise TypeError(f"Shape element {i} must have type `constexpr[int]`, got `{type(d)}")
+        if is_block_shape and not is_power_of_two(d.value):
+            raise ValueError(f"Shape element {i} must be a power of 2")
+        numel *= d.value
+
+    if numel > TRITON_MAX_TENSOR_NUMEL:
+        raise ValueError(f"numel ({numel}) exceeds triton maximum tensor numel ({TRITON_MAX_TENSOR_NUMEL})")
+    return numel
 
 @aggregate
 @dataclass
 class TensorDescriptor:
     """
     A comprehensive descriptor for tensors with layout information.
-    
-    This class encapsulates all the metadata needed to describe a tensor in Triton's
-    Gluon framework, including its data type, shape, memory strides, block shape for
-    tiling, and both global and shared memory layouts.
     
     Attributes:
         dtype: The Triton data type of the tensor elements
@@ -70,33 +70,13 @@ class TensorDescriptor:
         block_shape: The block shape for tiling operations as a Triton tuple
         global_layout: The global memory layout (BlockedLayout)
         shared_layout: The shared memory layout (SwizzledSharedLayout)
-        
-    Example:
-        >>> import torch
-        >>> import triton.experimental.gluon.language as gl
-        >>> 
-        >>> # Create layouts
-        >>> blocked_layout = gl.BlockedLayout(
-        ...     size_per_thread=[1, 4],
-        ...     threads_per_warp=[4, 16], 
-        ...     warps_per_cta=[1, 4],
-        ...     order=[1, 0]
-        ... )
-        >>> shared_layout = gl.SwizzledSharedLayout(
-        ...     vec=1, per_phase=1, max_phase=1, order=[1, 0]
-        ... )
-        >>> 
-        >>> # Create tensor and descriptor
-        >>> tensor = torch.randn(256, 512, dtype=torch.float32)
-        >>> desc = TensorDescriptor.from_tensor(
-        ...     tensor, [16, 32], blocked_layout, shared_layout
-        ... )
     """
     
     dtype: tl.dtype
     shape: tl.tuple
     strides: tl.tuple
     block_shape: tl.tuple
+    num_blocks: tl.tuple
     global_layout: gl.BlockedLayout
     shared_layout: gl.SwizzledSharedLayout
 
@@ -111,12 +91,15 @@ class TensorDescriptor:
             AssertionError: If validation fails
         """
         rank = len(self.shape)
-        assert len(self.strides) == rank, f"rank mismatch: {self}"
-        assert len(self.block_shape) == rank, f"rank mismatch: {self}"
+        assert len(self.strides) == rank, f"rank mismatch strides: {self}"
+        assert len(self.block_shape) == rank, f"rank mismatch block_shape: {self}"
+        assert len(self.num_blocks) == rank, f"rank mismatch num_blocks: {self}"
         assert rank > 0, "rank must not be zero"
         
         # Convert tuple to list for validate_block_shape
-        validate_block_shape(list(self.block_shape))
+        validate_shape(list(self.shape))
+        validate_shape(list(self.strides))
+        validate_shape(list(self.block_shape), is_block_shape=True)
         
         assert isinstance(self.global_layout, gl.BlockedLayout), "Layout must be gl.BlockedLayout"
         assert isinstance(self.shared_layout, gl.SwizzledSharedLayout), "Layout must be gl.SwizzledSharedLayout"
@@ -146,9 +129,10 @@ class TensorDescriptor:
         """
         return TensorDescriptor(
             torch_to_triton_dtype(tensor.dtype),
-            tl.tuple(tensor.shape),
-            tl.tuple(tensor.stride()),
-            tl.tuple(block_shape),
+            tl.tuple([tl.constexpr(s) for s in tensor.shape]),
+            tl.tuple([tl.constexpr(s) for s in tensor.stride()]),
+            tl.tuple([tl.constexpr(s) for s in block_shape]),
+            tl.tuple([tl.constexpr(math.ceil(s / bs)) for s, bs in zip(tensor.shape, block_shape)]),
             global_layout,
             shared_layout,
         )
