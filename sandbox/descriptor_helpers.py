@@ -13,6 +13,7 @@ Functions:
 """
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import torch
@@ -22,36 +23,25 @@ from triton._utils import validate_block_shape
 import triton.experimental.gluon.language as gl
 
 
-def torch_to_triton_dtype(torch_dtype: torch.dtype) -> tl.dtype:
+def torch_to_triton_dtype(dtype: torch.dtype) -> tl.dtype:
     """
     Convert a PyTorch dtype to the corresponding Triton dtype.
-    
-    Args:
-        torch_dtype: The PyTorch dtype to convert
-        
-    Returns:
-        The corresponding Triton dtype
-        
-    Raises:
-        ValueError: If the PyTorch dtype is not supported
-        
-    Examples:
-        >>> torch_to_triton_dtype(torch.float32)
-        tl.float32
-        >>> torch_to_triton_dtype(torch.int64)
-        tl.int64
     """
-    if torch_dtype == torch.float32:
-        return tl.float32
-    elif torch_dtype == torch.float16:
-        return tl.float16
-    elif torch_dtype == torch.int32:
-        return tl.int32
-    elif torch_dtype == torch.int64:
-        return tl.int64
-    else:
-        raise ValueError(f"Unsupported dtype: {torch_dtype}")
-
+    dtype_map = {
+        torch.float32: tl.float32,
+        torch.float16: tl.float16,
+        torch.bfloat16: tl.bfloat16,
+        torch.float64: tl.float64,
+        torch.int32: tl.int32,
+        torch.int64: tl.int64,
+        torch.int16: tl.int16,
+        torch.int8: tl.int8,
+        torch.uint8: tl.uint8,
+        torch.bool: tl.int1,
+    }
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    return dtype_map[dtype]
 
 @aggregate
 @dataclass
@@ -97,6 +87,7 @@ class TensorDescriptor:
     shape: tl.tuple
     strides: tl.tuple
     block_shape: tl.tuple
+    num_blocks: tl.tuple
     global_layout: gl.BlockedLayout
     shared_layout: gl.SwizzledSharedLayout
 
@@ -111,8 +102,9 @@ class TensorDescriptor:
             AssertionError: If validation fails
         """
         rank = len(self.shape)
-        assert len(self.strides) == rank, f"rank mismatch: {self}"
-        assert len(self.block_shape) == rank, f"rank mismatch: {self}"
+        assert len(self.strides) == rank, f"rank mismatch strides: {self}"
+        assert len(self.block_shape) == rank, f"rank mismatch block_shape: {self}"
+        assert len(self.num_blocks) == rank, f"rank mismatch num_blocks: {self}"
         assert rank > 0, "rank must not be zero"
         
         # Convert tuple to list for validate_block_shape
@@ -149,6 +141,7 @@ class TensorDescriptor:
             tl.tuple(tensor.shape),
             tl.tuple(tensor.stride()),
             tl.tuple(block_shape),
+            tl.tuple([math.ceil(s / bs) for s, bs in zip(tensor.shape, block_shape)]),
             global_layout,
             shared_layout,
         )
