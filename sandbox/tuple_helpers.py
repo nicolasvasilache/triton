@@ -149,6 +149,25 @@ def tuple_any(t: tl.tuple):
     return res
 
 @gluon.jit
+def tuple_add(ta: tl.tuple, tb: tl.tuple):
+    """
+    Element-wise addition of two tuples.
+    
+    Args:
+        ta: First tuple
+        tb: Second tuple (must have same length as ta)
+    
+    Returns:
+        Tuple where result[i] = ta[i] + tb[i]
+    """
+    gl.static_assert(len(ta) == len(tb), f"tuple_add: {ta} and {tb} must have the same length")
+    result = tl.tuple(ta)
+    for i in tl.static_range(len(ta)):
+        result._setitem(i, ta[i] + tb[i])
+    return result
+
+
+@gluon.jit
 def tuple_zip_2(t1: tl.tuple, t2: tl.tuple):
     """
     Zip two tuples together into a tuple of pairs.
