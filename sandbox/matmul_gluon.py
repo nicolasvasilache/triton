@@ -47,7 +47,10 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     tup_zip = tuple_zip_2(A.shape, A.block_shape)
     tup = gl.tuple([shape % block_shape != 0 for shape, block_shape in tup_zip]) # type: ignore
     needs_mask = tuple_any(tup) # type: ignore
-    mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout) # type: ignore
+    if needs_mask:
+        mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout)
+    else:
+        mask = gl.full(A.block_shape, gl.constexpr(True), gl.int1, A.global_layout)
 
     a = gl.load(a_ptr + a_offsets_nd, mask=mask)
     
