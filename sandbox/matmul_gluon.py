@@ -13,7 +13,11 @@ from triton.backends.compiler import GPUTarget
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon._runtime import GluonASTSource
 
-from tuple_helpers import delinearize, get_linear_program_id
+# Enable front-end debugging to get full stack traces
+# import os
+# os.environ["TRITON_FRONT_END_DEBUGGING"] = "1"
+
+from tuple_helpers import delinearize, get_linear_program_id, tuple_any, tuple_zip_2
 from descriptor_helpers import TensorDescriptor
 from nd_helpers import nd_offset_from_blocked_descriptor
 
@@ -39,6 +43,10 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     starts = delinearize(linear_program_id, A.block_shape) # type: ignore
     
     a_offsets_nd = nd_offset_from_blocked_descriptor(starts, A)
+    # Create mask if any dimension of A.block_shape does not evenly divide A.shape
+    tup_zip = tuple_zip_2(A.shape, A.block_shape)
+    tup = gl.tuple([shape % block_shape != 0 for shape, block_shape in tup_zip]) # type: ignore
+    needs_mask = tuple_any(tup) # type: ignore
     mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout) # type: ignore
 
     a = gl.load(a_ptr + a_offsets_nd, mask=mask)

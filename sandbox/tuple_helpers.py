@@ -131,3 +131,38 @@ def tuple_reduce_add(t: tl.tuple):
     for i in tl.static_range(1, len(t)):
         res += t[i]
     return res
+
+@gluon.jit
+def tuple_any(t: tl.tuple):
+    """
+    Check if any element in the tuple is truthy.
+    
+    Args:
+        t: Tuple to check
+    
+    Returns:
+        True if any element is truthy, False otherwise
+    """
+    res = t[0]
+    for i in tl.static_range(1, len(t)):
+        res = res or t[i]
+    return res
+
+@gluon.jit
+def tuple_zip_2(t1: tl.tuple, t2: tl.tuple):
+    """
+    Zip two tuples together into a tuple of pairs.
+    
+    Args:
+        t1: First tuple
+        t2: Second tuple
+    
+    Returns:
+        Tuple where result[i] = (t1[i], t2[i])
+    """
+    gl.static_assert(len(t1) == len(t2), f"tuple_zip_2: {t1} and {t2} must have the same length")
+    # Create a tuple of pairs using the same pattern as tuple_mul
+    result = tl.tuple([(t1[0], t2[0])] * len(t1))
+    for i in tl.static_range(len(t1)):
+        result._setitem(i, (t1[i], t2[i]))
+    return result
