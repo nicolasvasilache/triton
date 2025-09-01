@@ -17,9 +17,9 @@ from triton.experimental.gluon._runtime import GluonASTSource
 # import os
 # os.environ["TRITON_FRONT_END_DEBUGGING"] = "1"
 
-from tuple_helpers import delinearize, get_linear_program_id, tuple_any, tuple_zip_2
+from tuple_helpers import delinearize, get_linear_program_id
 from descriptor_helpers import TensorDescriptor
-from nd_helpers import nd_offset_from_blocked_descriptor
+from nd_helpers import nd_offset_from_blocked_descriptor, nd_mask_from_blocked_descriptor
 
 
 # To accept a non-static pointer, we have to pass a_ptr as a non-constexpr.
@@ -43,21 +43,14 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     starts = delinearize(linear_program_id, A.block_shape) # type: ignore
     
     a_offsets_nd = nd_offset_from_blocked_descriptor(starts, A)
-    # Create mask if any dimension of A.block_shape does not evenly divide A.shape
-    tup_zip = tuple_zip_2(A.shape, A.block_shape)
-    tup = gl.tuple([shape % block_shape != 0 for shape, block_shape in tup_zip]) # type: ignore
-    needs_mask = tuple_any(tup) # type: ignore
-    if needs_mask:
-        mask = gl.mask_nd(starts, A.shape, A.block_shape, A.global_layout)
-    else:
-        mask = gl.full(A.block_shape, gl.constexpr(True), gl.int1, A.global_layout)
+    mask_nd = nd_mask_from_blocked_descriptor(starts, A)
 
-    a = gl.load(a_ptr + a_offsets_nd, mask=mask)
+    a = gl.load(a_ptr + a_offsets_nd, mask=mask_nd)
     
     b_offsets_nd = nd_offset_from_blocked_descriptor(starts, B)
-    mask = gl.convert_layout(mask, B.global_layout, assert_trivial=False) # type: ignore
+    mask_nd = gl.convert_layout(mask_nd, B.global_layout, assert_trivial=False) # type: ignore
     
-    via_explicit_shared_memory: gl.constexpr = False
+    via_explicit_shared_memory: gl.constexpr = True
     if via_explicit_shared_memory:
         smem = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout) # type: ignore
         smem.store(a)
@@ -65,7 +58,7 @@ def copy_kernel(a_ptr, b_ptr, A: gl.constexpr, B: gl.constexpr):
     else:
         b = gl.convert_layout(a, B.global_layout, assert_trivial=False) # type: ignore
     
-    gl.store(b_ptr + b_offsets_nd, b, mask=mask)
+    gl.store(b_ptr + b_offsets_nd, b, mask=mask_nd)
 
 
 def compile_with_ast_source(A: torch.Tensor, B: torch.Tensor, a_desc: TensorDescriptor, b_desc: TensorDescriptor, warp_size=64, num_warps=1):
