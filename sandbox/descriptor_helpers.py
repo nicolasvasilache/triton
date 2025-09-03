@@ -14,7 +14,7 @@ Functions:
 
 from dataclasses import dataclass
 import math
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import triton.language as tl
@@ -43,7 +43,7 @@ def torch_to_triton_dtype(dtype: torch.dtype) -> tl.dtype:
         raise ValueError(f"Unsupported dtype: {dtype}")
     return dtype_map[dtype]
 
-TRITON_MAX_TENSOR_NUMEL = 2 ** 31
+TRITON_MAX_TENSOR_NUMEL = 2 ** 63
 def validate_shape(shape: List[tl.constexpr], is_block_shape: bool = False):
     numel = 1
     for i, d in enumerate(shape):
@@ -78,7 +78,7 @@ class TensorDescriptor:
     block_shape: tl.tuple
     num_blocks: tl.tuple
     global_layout: gl.BlockedLayout
-    shared_layout: gl.SwizzledSharedLayout
+    shared_layout: Optional[gl.SwizzledSharedLayout] = None
 
     def __post_init__(self):
         """
@@ -102,13 +102,13 @@ class TensorDescriptor:
         validate_shape(list(self.block_shape), is_block_shape=True)
         
         assert isinstance(self.global_layout, gl.BlockedLayout), "Layout must be gl.BlockedLayout"
-        assert isinstance(self.shared_layout, gl.SwizzledSharedLayout), "Layout must be gl.SwizzledSharedLayout"
+        assert self.shared_layout is None or isinstance(self.shared_layout, gl.SwizzledSharedLayout), "Layout must be gl.SwizzledSharedLayout"
 
     @staticmethod
     def from_tensor(tensor: Any,
                     block_shape: tuple[int],
                     global_layout: gl.BlockedLayout,
-                    shared_layout: gl.SwizzledSharedLayout) -> 'TensorDescriptor':
+                    shared_layout: gl.SwizzledSharedLayout = None) -> 'TensorDescriptor':
         """
         Create a TensorDescriptor from a PyTorch tensor and layout information.
         

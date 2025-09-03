@@ -52,7 +52,7 @@ def nd_offset_from_blocked_descriptor(start_blocks: tl.tuple,
     shift_1d = tuple_reduce_add(tuple_mul(
         start_blocks,
         tuple_mul(blocked_desc.block_shape, blocked_desc.strides)))
-    return base_offsets_nd + shift_1d
+    return base_offsets_nd + shift_1d, base_offsets_nd, shift_1d
 
 
 @gluon.jit

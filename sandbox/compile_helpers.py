@@ -1,5 +1,6 @@
 import tempfile
-from mpmath.functions.bessel import ker
+from typing import Callable
+
 import torch
 import triton
 from triton.backends.compiler import GPUTarget
@@ -92,7 +93,7 @@ def compile_with_parser(kernel_fn: JITFunction, *args, warp_size: int = 64, num_
             print(f"ttir_path after run_parser: {f.name}")
 
 
-def run_kernel(kernel_fn: JITFunction, grid: tuple, *args, warp_size: int = 64, num_warps: int = 1):
+def run_kernel(kernel_fn: JITFunction, check_fn: Callable, grid: tuple, *args, warp_size: int = 64, num_warps: int = 1):
     # Move tensors to CUDA (only torch.Tensor objects)
     cuda_args = []
     for arg in args:
@@ -103,3 +104,4 @@ def run_kernel(kernel_fn: JITFunction, grid: tuple, *args, warp_size: int = 64, 
     
     # Call kernel with all arguments
     kernel_fn[grid](*cuda_args, warp_size=warp_size, num_warps=num_warps)
+    check_fn(cuda_args)
