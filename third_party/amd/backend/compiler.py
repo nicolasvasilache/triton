@@ -271,11 +271,6 @@ class HIPBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
 
-        # amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, global_prefetch, local_prefetch, use_async_copy,
-        #                                        use_block_pingpong)
-        passes.ttgpuir.add_remove_layout_conversions(pm)
-        amd.passes.ttgpuir.add_stream_pipeline(pm, 2, 0, 1, False, False)
-
         pm.run(mod)
         return mod
 
