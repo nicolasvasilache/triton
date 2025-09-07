@@ -43,7 +43,7 @@ def matmul(
     acc = gl.full(C.block_shape, 0, dtype=C.dtype, layout=mfma_layout)
 
     # Warning: bad surprises about if we're going out of offset bounds for buffer_load
-    use_buffer_ops: gl.constexpr = True
+    use_buffer_ops: gl.constexpr = False
 
     smem_a = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout)
     smem_b = gl.allocate_shared_memory(B.dtype, B.block_shape, layout=B.shared_layout)
@@ -141,7 +141,7 @@ def test():
         (num_xcd * num_warps) // 8, \
                              8 * 4, \
                               512
-    BLOCK_M, BLOCK_N, BLOCK_K = 128 * num_warps, 64, 64 // num_warps
+    BLOCK_M, BLOCK_N, BLOCK_K = 64 * num_warps, 64, 32 // num_warps
     M, N, K = BLOCK_M * factor_m, BLOCK_N * factor_n, BLOCK_K * factor_k
 
     # Create test tensors.
