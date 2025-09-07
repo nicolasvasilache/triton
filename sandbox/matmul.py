@@ -196,6 +196,7 @@ def test():
 
 
     # Check and time by default, if we profile, don't check or time.
+    profile_it = True
     profile_it = False
     time_it = not profile_it
     check = time_it
