@@ -62,7 +62,7 @@ def matmul(
             a = gl.load(a_ptr + off_a, mask_nd_a)
             b = gl.load(b_ptr + off_b, mask_nd_b)
 
-        use_smem: gl.constexpr = False
+        use_smem: gl.constexpr = True
         if use_smem:
             smem_a.store(a)
             smem_b.store(b)
