@@ -43,7 +43,7 @@ def matmul(
     acc = gl.full(C.block_shape, 0, dtype=C.dtype, layout=mfma_layout)
 
     # Warning: bad surprises about if we're going out of offset bounds for buffer_load
-    use_buffer_ops: gl.constexpr = True
+    use_buffer_ops: gl.constexpr = False
 
     smem_a = gl.allocate_shared_memory(A.dtype, A.block_shape, layout=A.shared_layout)
     smem_b = gl.allocate_shared_memory(B.dtype, B.block_shape, layout=B.shared_layout)
@@ -196,6 +196,7 @@ def test():
 
 
     # Check and time by default, if we profile, don't check or time.
+    profile_it = True
     profile_it = False
     time_it = not profile_it
     check = time_it
